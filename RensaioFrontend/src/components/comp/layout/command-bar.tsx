@@ -384,6 +384,7 @@ function getSearchPlaceholder(
     | "library"
     | "providers"
     | "queue"
+    | "cloudLatest"
     | "settings"
     | "series"
     | "other",
@@ -395,6 +396,8 @@ function getSearchPlaceholder(
       return "Filter sources...";
     case "queue":
       return "Filter queue...";
+    case "cloudLatest":
+      return "Filter latest...";
     default:
       return "Filter...";
   }

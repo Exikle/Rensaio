@@ -1,6 +1,7 @@
 using RensaioBackend.Models.Database;
 using RensaioBackend.Models.Dto;
 using RensaioBackend.Models.Enums;
+using RensaioBackend.Extensions;
 using RensaioBackend.Services.Auth;
 using RensaioBackend.Services.Users;
 using RensaioBackend.Services.Settings;
@@ -277,9 +278,7 @@ public class UserController : ControllerBase
         await _dbSaveChangesAsync(user, token);
 
         var settings = await _settingsService.GetSettingsAsync();
-        string externalDomain = string.IsNullOrWhiteSpace(settings.ExternalDomain)
-            ? $"http://localhost:9833"
-            : settings.ExternalDomain;
+        string externalDomain = Request.ResolveBaseUrl(settings.ExternalDomain);
 
         string message = _userInviteService.GetInviteMessage(user, externalDomain, settings.AuthenticationEnabled);
 

@@ -120,7 +120,10 @@ namespace RensaioBackend
             // incorrectly use http:// instead of https://.
             services.Configure<ForwardedHeadersOptions>(options =>
             {
-                options.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
+                // XForwardedHost ensures Request.Host is rewritten from the X-Forwarded-Host
+                // header so URL generation (invite links, set-password redirects, OPDS URLs)
+                // reflects the externally visible host behind a reverse proxy.
+                options.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto | ForwardedHeaders.XForwardedHost;
                 // Clear default restrictions to accept forwarded headers from any proxy.
                 // This is safe when the app is always deployed behind a trusted reverse proxy.
                 options.KnownNetworks.Clear();

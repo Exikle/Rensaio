@@ -3,6 +3,7 @@ using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Mvc;
 using System.ComponentModel.DataAnnotations;
 using RensaioBackend.Data;
+using RensaioBackend.Extensions;
 using RensaioBackend.Models.Database;
 using RensaioBackend.Services.Settings;
 using RensaioBackend.Models.Dto;
@@ -145,11 +146,7 @@ namespace RensaioBackend.Controllers
                         _db.Entry(user).State = EntityState.Modified;
                         await _db.SaveChangesAsync(token).ConfigureAwait(false);
 
-                        string externalDomain = string.IsNullOrWhiteSpace(settings.ExternalDomain)
-                            ? $"http://localhost:9833"
-                            : settings.ExternalDomain;
-
-                        string cleanDomain = externalDomain.TrimEnd('/');
+                        string cleanDomain = Request.ResolveBaseUrl(settings.ExternalDomain);
                         response.SetPasswordUrl = $"{cleanDomain}/auth/set-password?username={Uri.EscapeDataString(user.Username)}&token={user.PasswordSetToken}";
                         response.Message = "Authentication enabled. You must set a password to log in.";
                     }

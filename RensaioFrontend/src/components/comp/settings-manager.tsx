@@ -58,6 +58,28 @@ const isValidUrl = (url: string): boolean => {
   }
 };
 
+/**
+ * Re-hosts a set-password URL onto the CURRENT origin.
+ *
+ * The backend builds setPasswordUrl from the configured ExternalDomain, falling
+ * back to the request host. But if ExternalDomain is empty/stale, it could be an
+ * absolute URL pointing at another host (e.g. http://localhost:9833) while the
+ * user is browsing via a LAN IP (e.g. http://192.168.68.70:9833). Navigating
+ * there would send the username/token to the wrong host and appear to "bounce
+ * back to login".
+ *
+ * We keep only the path + query (which carry the token) and prefix them with the
+ * current origin so the redirect can never leave the page the user is on.
+ */
+const safeSetPasswordUrl = (url: string): string => {
+  try {
+    const parsed = new URL(url, window.location.href);
+    return `${window.location.origin}${parsed.pathname}${parsed.search}`;
+  } catch {
+    return url;
+  }
+};
+
 const timeSpanToTimeInput = (timeSpan: string): string => {
   if (!timeSpan) return "00:00";
 
@@ -1168,7 +1190,10 @@ function SecuritySection({
           </p>
         )}
         <p className="text-xs text-muted-foreground">
-          Used for invite links and OPDS URLs when accessed from outside your local network.
+          Base URL used for invite links and OPDS URLs. Fill this in when Rensaiō is
+          accessed from outside your local network (e.g. a reverse proxy). When left
+          empty, links are generated from the address you're currently using to reach
+          the app (e.g. http://192.168.x.x:9833), so users on your LAN get working links.
         </p>
       </div>
     </CardContent>
@@ -1368,9 +1393,12 @@ export function SettingsManager({
         const result = await updateSettingsMutation.mutateAsync(localSettings);
 
         // If the backend returned a set-password URL, redirect the user
-        // so they can set their password before being locked out
+        // so they can set their password before being locked out.
+        // Harden the URL: always navigate on the CURRENT origin so the
+        // username/token are never sent to a different host (e.g. a hardcoded
+        // http://localhost:9833 when Rensaiō is accessed via a LAN IP).
         if (result?.setPasswordUrl) {
-          window.location.href = result.setPasswordUrl;
+          window.location.href = safeSetPasswordUrl(result.setPasswordUrl);
           return;
         }
 

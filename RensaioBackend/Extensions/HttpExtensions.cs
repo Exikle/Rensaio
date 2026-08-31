@@ -98,6 +98,39 @@
 
 
         /// <summary>
+        /// Resolves the externally visible base URL used to build user-facing links
+        /// (invite links, set-password redirects, OPDS URLs).
+        ///
+        /// Priority:
+        /// 1. The configured ExternalDomain setting (for reverse-proxy / remote access scenarios).
+        /// 2. The current request's scheme + host. Behind a reverse proxy these are already
+        ///    rewritten from X-Forwarded-Proto / X-Forwarded-Host by UseForwardedHeaders
+        ///    (see Startup.cs, which forwards For/Proto/Host), so links reflect the external
+        ///    host. On a LAN the raw values are used (e.g. http://192.168.68.70:9833).
+        /// </summary>
+        /// <param name="request">The HTTP request used as fallback origin.</param>
+        /// <param name="externalDomain">The configured external domain (may be empty).</param>
+        /// <returns>A trimmed base URL with no trailing slash.</returns>
+        public static string ResolveBaseUrl(this HttpRequest? request, string externalDomain)
+        {
+            string baseUrl;
+            if (!string.IsNullOrWhiteSpace(externalDomain))
+            {
+                baseUrl = externalDomain;
+            }
+            else if (request != null)
+            {
+                baseUrl = $"{request.Scheme}://{request.Host}";
+            }
+            else
+            {
+                baseUrl = "http://localhost:9833";
+            }
+
+            return baseUrl.TrimEnd('/');
+        }
+
+        /// <summary>
         /// Adds an ETag header to the response
         /// </summary>
         /// <param name="etag">The ETag value to add</param>

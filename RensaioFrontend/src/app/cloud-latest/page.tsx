@@ -74,7 +74,6 @@ function calculateItemsPerPage(cardWidth: string): number {
 const SESSION_KEYS = {
   sourceId: "ren_cloud_sourceId",
   cardWidth: "ren_cloud_cardWidth",
-  search: "ren_cloud_search",
   genres: "ren_cloud_genres",
 };
 
@@ -204,25 +203,6 @@ export default function CloudLatestPage() {
     { value: "w-58", label: "L", text: "text-base" },
     { value: "w-70", label: "XL", text: "text-lg" },
   ];
-
-  // Sync search box value in sessionStorage
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    const searchInput = document.querySelector<HTMLInputElement>(
-      "input[type='search'], input[type='text'][placeholder*='search']"
-    );
-    if (!searchInput) return;
-    // Set initial value
-    const saved = sessionStorage.getItem(SESSION_KEYS.search);
-    if (saved && searchInput.value !== saved) searchInput.value = saved;
-    // Save on change
-    const handler = (e: Event) => {
-      const target = e.target as HTMLInputElement;
-      sessionStorage.setItem(SESSION_KEYS.search, target.value);
-    };
-    searchInput.addEventListener("input", handler);
-    return () => searchInput.removeEventListener("input", handler);
-  }, [SESSION_KEYS.search]);
 
   // Memoize a stable signature of selectedGenres so reset effect only fires
   // on actual content change (not array identity churn).
