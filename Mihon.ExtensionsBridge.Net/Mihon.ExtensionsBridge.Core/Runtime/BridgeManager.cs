@@ -184,6 +184,21 @@ namespace Mihon.ExtensionsBridge.Core.Runtime
                         config.setCefWebViewPoolEnabled(prefs.Cef.WebViewPoolEnabled);
                         update = true;
                     }
+                    if (prefs.Cef.Enabled != config.getCefEnabled())
+                    {
+                        config.setCefEnabled(prefs.Cef.Enabled);
+                        update = true;
+                    }
+                    if (prefs.Cef.PumpActiveIntervalMs > 0 && prefs.Cef.PumpActiveIntervalMs != config.getCefPumpActiveIntervalMs())
+                    {
+                        config.setCefPumpActiveIntervalMs(prefs.Cef.PumpActiveIntervalMs);
+                        update = true;
+                    }
+                    if (prefs.Cef.PumpIdleIntervalMs > 0 && prefs.Cef.PumpIdleIntervalMs != config.getCefPumpIdleIntervalMs())
+                    {
+                        config.setCefPumpIdleIntervalMs(prefs.Cef.PumpIdleIntervalMs);
+                        update = true;
+                    }
                 }
                 if (prefs.SocksProxy != null)
                 {

@@ -34,6 +34,12 @@ export interface Settings {
   flareSolverrTimeout: string; // TimeSpan as string
   flareSolverrSessionTtl: string; // TimeSpan as string
   flareSolverrAsResponseFallback: boolean;
+  cefEnabled: boolean;
+  cefMaxRenderers: number;
+  cefIdleTimeoutMs: number;
+  cefWebViewPoolEnabled: boolean;
+  cefPumpActiveIntervalMs: number;
+  cefPumpIdleIntervalMs: number;
   storageFolder: string;
   socksProxyEnabled: boolean;
   socksProxyVersion: number;

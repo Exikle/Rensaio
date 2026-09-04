@@ -43,13 +43,22 @@ namespace RensaioTray.Utils
                 }
 
                 _cefPumpTimer = new Avalonia.Threading.DispatcherTimer(
-                    TimeSpan.FromMilliseconds(10),
+                    TimeSpan.FromMilliseconds(CefPumpBridge.CurrentIntervalMs()),
                     Avalonia.Threading.DispatcherPriority.Background,
                     (sender, e) =>
                     {
                         try
                         {
                             CefPumpBridge.PumpWork();
+
+                            // Adaptive cadence: while a browser is alive the pump runs at the
+                            // active interval; with no renderers it backs off to the idle
+                            // interval so the idle process stops busy-polling at 100 Hz.
+                            var desired = TimeSpan.FromMilliseconds(CefPumpBridge.CurrentIntervalMs());
+                            if (_cefPumpTimer?.Interval != desired)
+                            {
+                                _cefPumpTimer!.Interval = desired;
+                            }
                         }
                         catch (Exception ex)
                         {
@@ -58,7 +67,7 @@ namespace RensaioTray.Utils
                     });
 
                 _cefPumpTimer.Start();
-                _logger.LogInformation("CEF external message pump timer started (DispatcherTimer, 10ms interval)");
+                _logger.LogInformation("CEF external message pump timer started (adaptive interval: active 10ms / idle 500ms)");
 
             });
 

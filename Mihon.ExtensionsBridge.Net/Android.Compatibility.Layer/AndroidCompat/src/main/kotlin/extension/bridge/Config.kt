@@ -31,6 +31,9 @@ class SettingsConfig(
         var cefMaxRenderers: Int = 4,
         var cefIdleTimeoutMs: Long = 300_000L,
         var cefWebViewPoolEnabled: Boolean = true,
+        var cefEnabled: Boolean = true,
+        var cefPumpActiveIntervalMs: Long = 10L,
+        var cefPumpIdleIntervalMs: Long = 500L,
         var interceptorOverrides: MutableMap<String, MutableMap<String, Boolean>> = mutableMapOf(),
     )
 
@@ -60,6 +63,9 @@ class SettingsConfig(
         updateIfChanged("cefMaxRenderers", current.cefMaxRenderers, settings.cefMaxRenderers)
         updateIfChanged("cefIdleTimeoutMs", current.cefIdleTimeoutMs, settings.cefIdleTimeoutMs)
         updateIfChanged("cefWebViewPoolEnabled", current.cefWebViewPoolEnabled, settings.cefWebViewPoolEnabled)
+        updateIfChanged("cefEnabled", current.cefEnabled, settings.cefEnabled)
+        updateIfChanged("cefPumpActiveIntervalMs", current.cefPumpActiveIntervalMs, settings.cefPumpActiveIntervalMs)
+        updateIfChanged("cefPumpIdleIntervalMs", current.cefPumpIdleIntervalMs, settings.cefPumpIdleIntervalMs)
         updateIfChanged("interceptorOverrides", current.interceptorOverrides, settings.interceptorOverrides)
 
         return settings
@@ -92,6 +98,9 @@ class SettingsConfig(
             cefMaxRenderers = intOrDefault("cefMaxRenderers", defaults.cefMaxRenderers),
             cefIdleTimeoutMs = longOrDefault("cefIdleTimeoutMs", defaults.cefIdleTimeoutMs),
             cefWebViewPoolEnabled = booleanOrDefault("cefWebViewPoolEnabled", defaults.cefWebViewPoolEnabled),
+            cefEnabled = booleanOrDefault("cefEnabled", defaults.cefEnabled),
+            cefPumpActiveIntervalMs = longOrDefault("cefPumpActiveIntervalMs", defaults.cefPumpActiveIntervalMs),
+            cefPumpIdleIntervalMs = longOrDefault("cefPumpIdleIntervalMs", defaults.cefPumpIdleIntervalMs),
             interceptorOverrides = nestedBooleanMapOrDefault("interceptorOverrides", defaults.interceptorOverrides),
         )
 
@@ -221,6 +230,24 @@ object Settings {
             state().cefWebViewPoolEnabled = value
         }
 
+    var cefEnabled: Boolean
+        get() = state().cefEnabled
+        set(value) {
+            state().cefEnabled = value
+        }
+
+    var cefPumpActiveIntervalMs: Long
+        get() = state().cefPumpActiveIntervalMs
+        set(value) {
+            state().cefPumpActiveIntervalMs = value
+        }
+
+    var cefPumpIdleIntervalMs: Long
+        get() = state().cefPumpIdleIntervalMs
+        set(value) {
+            state().cefPumpIdleIntervalMs = value
+        }
+
     var interceptorOverrides: MutableMap<String, MutableMap<String, Boolean>>
         get() = state().interceptorOverrides
         set(value) {
@@ -326,6 +353,9 @@ private fun SettingsConfig.Settings.updateFrom(other: SettingsConfig.Settings) {
     cefMaxRenderers = other.cefMaxRenderers
     cefIdleTimeoutMs = other.cefIdleTimeoutMs
     cefWebViewPoolEnabled = other.cefWebViewPoolEnabled
+    cefEnabled = other.cefEnabled
+    cefPumpActiveIntervalMs = other.cefPumpActiveIntervalMs
+    cefPumpIdleIntervalMs = other.cefPumpIdleIntervalMs
     interceptorOverrides = other.interceptorOverrides.deepCopy()
 }
 

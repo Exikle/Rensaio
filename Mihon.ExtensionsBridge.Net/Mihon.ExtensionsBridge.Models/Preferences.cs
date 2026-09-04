@@ -39,6 +39,24 @@ namespace Mihon.ExtensionsBridge.Models
         /// Whether WebView pooling/reuse across requests is enabled.
         /// </summary>
         public bool WebViewPoolEnabled { get; set; } = true;
+
+        /// <summary>
+        /// Master switch for the embedded JCEF/CEF browser (boot-time). When disabled, JCEF is
+        /// never initialized (no ~512 MiB baseline, no CEF CPU overhead) and WebView-requiring
+        /// sources fall back to the direct network chain / FlareSolverr. Requires restart.
+        /// </summary>
+        public bool Enabled { get; set; } = true;
+
+        /// <summary>
+        /// CEF message-pump interval (ms) while at least one renderer is alive. Default 10 ms.
+        /// </summary>
+        public int PumpActiveIntervalMs { get; set; } = 10;
+
+        /// <summary>
+        /// CEF message-pump interval (ms) when no renderer is alive. Default 500 ms - this is the
+        /// idle backoff that eliminates the perpetual 100 Hz busy-poll CPU burn (issue #87).
+        /// </summary>
+        public int PumpIdleIntervalMs { get; set; } = 500;
     }
 
     public class Preferences

@@ -46,6 +46,12 @@ public class EditableSettingsDto
     public int CefIdleTimeoutMs { get; set; } = 300_000;
     [JsonPropertyName("cefWebViewPoolEnabled")]
     public bool CefWebViewPoolEnabled { get; set; } = true;
+    [JsonPropertyName("cefEnabled")]
+    public bool CefEnabled { get; set; } = true;
+    [JsonPropertyName("cefPumpActiveIntervalMs")]
+    public int CefPumpActiveIntervalMs { get; set; } = 10;
+    [JsonPropertyName("cefPumpIdleIntervalMs")]
+    public int CefPumpIdleIntervalMs { get; set; } = 500;
 
     [JsonPropertyName("isWizardSetupComplete")]
     public bool IsWizardSetupComplete { get; set; } = false;

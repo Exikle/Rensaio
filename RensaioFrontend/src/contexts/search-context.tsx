@@ -1,60 +1,105 @@
 "use client";
 
-import React, { createContext, useContext, useState, useCallback } from 'react';
+import React, { createContext, useContext, useState, useCallback, useRef } from 'react';
 import { usePathname } from 'next/navigation';
 import { useDebounce } from '@/lib/hooks/useDebounce';
 
+type PageKey = 'library' | 'providers' | 'queue' | 'cloudLatest' | 'settings' | 'series' | 'other';
+
 interface SearchContextType {
+  /** The search term for the currently active page. */
   searchTerm: string;
+  /** Debounced version of the current page's search term. */
   debouncedSearchTerm: string;
   setSearchTerm: (term: string) => void;
   clearSearch: () => void;
-  currentPage: 'library' | 'providers' | 'queue' | 'settings' | 'series' | 'other';
+  currentPage: PageKey;
   isSearchDisabled: boolean;
 }
 
 const SearchContext = createContext<SearchContextType | undefined>(undefined);
 
+/**
+ * Maps a route to the page context that owns its search state.
+ * Each distinct page keeps its own independent search term, so switching
+ * between Library / Discover / Queue / Sources never leaks a term across.
+ */
+function getPageKey(pathname: string): PageKey {
+  if (pathname === '/' || pathname === '/library') return 'library';
+  if (pathname === '/cloud-latest') return 'cloudLatest';
+  if (pathname === '/providers') return 'providers';
+  if (pathname === '/queue') return 'queue';
+  if (pathname === '/settings' || pathname.startsWith('/library/settings')) return 'settings';
+  if (pathname.startsWith('/library/series')) return 'series';
+  return 'other';
+}
+
+/**
+ * Returns the sessionStorage key that persists a page's search term.
+ * The key encodes the page so terms never collide across pages.
+ */
+function storageKeyForPage(page: PageKey): string {
+  if (page === 'other' || page === 'settings' || page === 'series') return '';
+  return `ren_search_${page}`;
+}
+
 export function SearchProvider({ children }: { children: React.ReactNode }) {
-  // Initialize searchTerm from sessionStorage if available
-  const [searchTerm, setSearchTermState] = useState(() => {
-    if (typeof window === "undefined") return '';
-    const saved = sessionStorage.getItem('ren_search');
-    return saved || '';
-  });
   const pathname = usePathname();
-  
-  // Debounce search term for performance
-  const debouncedSearchTerm = useDebounce(searchTerm, 300);  // Determine current page based on pathname
-  const currentPage = React.useMemo(() => {
-    if (pathname === '/' || pathname === '/library') return 'library';
-    if (pathname === '/providers') return 'providers';
-    if (pathname === '/queue') return 'queue';
-    if (pathname === '/settings' || pathname.startsWith('/library/settings')) return 'settings';
-    if (pathname.startsWith('/library/series')) return 'series';
-    return 'other';
-  }, [pathname]);
+  const currentPage = React.useMemo(() => getPageKey(pathname), [pathname]);
+
+  // Keep one independent term per page, initialized from that page's own
+  // sessionStorage slot so a full reload restores each page's filter.
+  const [termsByPage, setTermsByPage] = useState<Record<PageKey, string>>(() => {
+    if (typeof window === "undefined") return { library: '', providers: '', queue: '', cloudLatest: '', settings: '', series: '', other: '' };
+    const init = {} as Record<PageKey, string>;
+    (Object.keys({ library: 1, providers: 1, queue: 1, cloudLatest: 1, settings: 1, series: 1, other: 1 }) as PageKey[]).forEach((page) => {
+      const key = storageKeyForPage(page);
+      init[page] = key ? (sessionStorage.getItem(key) || '') : '';
+    });
+    return init;
+  });
+
+  const searchTerm = termsByPage[currentPage] ?? '';
+
+  // When the page changes, the visible term jumps immediately (no stale
+  // debounce echo). Only the term that is actually being typed is debounced.
+  const lastTypedPageRef = useRef<PageKey>(currentPage);
+  const debouncedTypedTerm = useDebounce(searchTerm, 300);
+  const debouncedSearchTerm =
+    lastTypedPageRef.current === currentPage ? debouncedTypedTerm : searchTerm;
+
+  const setSearchTerm = useCallback(
+    (term: string) => {
+      lastTypedPageRef.current = currentPage;
+      setTermsByPage((prev) => {
+        if (prev[currentPage] === term) return prev;
+        return { ...prev, [currentPage]: term };
+      });
+      const key = storageKeyForPage(currentPage);
+      if (typeof window !== "undefined" && key) {
+        sessionStorage.setItem(key, term);
+      }
+    },
+    [currentPage],
+  );
+
+  const clearSearch = useCallback(() => {
+    lastTypedPageRef.current = currentPage;
+    setTermsByPage((prev) => {
+      if (!prev[currentPage]) return prev;
+      return { ...prev, [currentPage]: '' };
+    });
+    const key = storageKeyForPage(currentPage);
+    if (typeof window !== "undefined" && key) {
+      sessionStorage.setItem(key, '');
+    }
+  }, [currentPage]);
 
   // Determine if search should be disabled
   const isSearchDisabled = React.useMemo(() => {
     return currentPage === 'settings' || currentPage === 'series';
   }, [currentPage]);
 
-  const setSearchTerm = useCallback((term: string) => {
-    setSearchTermState(term);
-    // Persist to sessionStorage
-    if (typeof window !== "undefined") {
-      sessionStorage.setItem('ren_search', term);
-    }
-  }, []);
-
-  const clearSearch = useCallback(() => {
-    setSearchTermState('');
-    // Clear from sessionStorage
-    if (typeof window !== "undefined") {
-      sessionStorage.setItem('ren_search', '');
-    }
-  }, []);
   return (
     <SearchContext.Provider
       value={{

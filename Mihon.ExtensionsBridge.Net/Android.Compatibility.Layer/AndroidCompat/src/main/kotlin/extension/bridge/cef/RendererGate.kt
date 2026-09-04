@@ -40,19 +40,34 @@ object RendererGate {
     fun liveCount(): Int = live.get()
 
     /**
+     * Whether the embedded CEF browser is enabled at all (boot-time setting).
+     * When disabled, spawns are denied and the interceptor falls back to the direct network
+     * chain / FlareSolverr, exactly as it already does when the renderer budget is exhausted.
+     */
+    fun isEnabled(): Boolean = Settings.cefEnabled
+
+    /**
      * Fast, non-reserving check: would [reserve] currently succeed?
      * Used by the interceptor to skip the looper hop and fall back to the direct network chain
-     * when the budget is already exhausted.
+     * when the budget is already exhausted or the browser is disabled.
      */
-    fun canSpawn(): Boolean = live.get() < maxRenderers()
+    fun canSpawn(): Boolean = isEnabled() && live.get() < maxRenderers()
 
     /**
      * Atomically reserves a renderer slot if one is available. Called by the provider immediately
-     * before creating a CEF browser. Returns false when the cap is reached — the caller must NOT
-     * create a browser then (the extension will see a clean failure/timeout and its own retry or
-     * fallback logic can kick in).
+     * before creating a CEF browser. Returns false when the cap is reached or CEF is disabled —
+     * the caller must NOT create a browser then (the extension will see a clean failure/timeout
+     * and its own retry or fallback logic can kick in).
+     *
+     * On success, ensures the CEF message pump is running (lazy start — see
+     * [CefMessageLoopBridge.ensureStarted]) and wakes it so it drops to the active 10 ms cadence
+     * immediately instead of sleeping out the idle interval.
      */
     fun reserve(): Boolean {
+        if (!isEnabled()) {
+            refused.incrementAndGet()
+            return false
+        }
         val cap = maxRenderers()
         while (true) {
             val current = live.get()
@@ -62,6 +77,11 @@ object RendererGate {
             }
             if (live.compareAndSet(current, current + 1)) {
                 peak.accumulateAndGet(current + 1, ::maxOf)
+                val app = CefAppBridge.getSharedApp()
+                if (app != null) {
+                    CefMessageLoopBridge.ensureStarted(app)
+                    CefMessageLoopBridge.notifyRendererSpawned()
+                }
                 return true
             }
         }

@@ -1369,6 +1369,17 @@ class KcefWebViewProvider(
     ) {
         Log.v(TAG, "KcefWebViewProvider: initialize")
         destroy()
+
+        // Master switch: when the embedded browser is disabled, do not initialize CEF at all.
+        // The interceptor already degrades to the direct network chain / FlareSolverr via
+        // RendererGate.canSpawn() == false; this guard keeps a stray WebView from paying the
+        // ~512 MiB baseline + native thread cost behind the user's back.
+        if (!RendererGate.isEnabled()) {
+            Log.i(TAG, "CEF disabled via configuration; WebView provider will not initialize")
+            cefFailed = true
+            return
+        }
+
         val cefApp = ensureCefApp()
 
         // If CEF already failed native initialization (previous attempt), do not call createClient()

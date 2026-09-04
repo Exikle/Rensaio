@@ -285,8 +285,10 @@ fun applicationSetup(dataRoot: String, tempRoot: String, sink: AndroidCompatLogS
     installJulBridge()
     // Desktop builds (external pump mode / CEF in use) exercise the AWT/Swing OSR path; pre-warm
     // its event threads now. Headless server builds (externalCef == false) skip this to avoid
-    // starting AWT machinery that is never used.
-    if (externalCef) {
+    // starting AWT machinery that is never used. Also skipped when the embedded browser is
+    // disabled via cefEnabled (boot-time master switch) — no CEF means no OSR/EDT churn.
+    val cefEnabled = runCatching { Settings.cefEnabled }.getOrDefault(true)
+    if (externalCef && cefEnabled) {
         prewarmAwtEventThreads(logger)
     }
     AndroidCompatRuntime.setDefaultUncaughtHandler(Thread.UncaughtExceptionHandler { _, throwable ->
@@ -407,21 +409,29 @@ fun applicationSetup(dataRoot: String, tempRoot: String, sink: AndroidCompatLogS
     // crashes ~1 minute after WebView use.
     CefAppBridge.setExternalPump(externalCef)
 
-    // Synchronous JCEF initialization — must complete before any extension
-    // tries to create a WebView.  The Comix (and similar) extension calls
-    // runInWebView which creates a WebView on the main looper thread, which
-    // in turn calls CefAppBridge.getOrCreate().  If sharedApp is still null
-    // (because the old async init hadn't finished yet), the main looper blocks
-    // on the CefAppBuilder.build() lock, causing a 90+ second timeout and
-    // "Failed to start WebView" errors.
-    logger.info { "Initializing JCEF runtime — this may take a while" }
-    runCatching { KcefWebViewProvider.ensureRuntimeReady() }
-        .onSuccess {
-            logger.info { "JCEF runtime initialized" }
-        }
-        .onFailure { throwable ->
-            logger.warn(throwable) { "Unable to warm up KCEF runtime" }
-        }
+    // Boot-time master switch: when cefEnabled is false, JCEF is never initialized
+    // (no ~512 MiB baseline, no native threads, no CPU overhead). WebView-requiring
+    // sources degrade to the direct network chain / FlareSolverr exactly as they do
+    // when JCEF init fails headlessly. Takes effect on restart.
+    if (!cefEnabled) {
+        logger.warn { "CEF is disabled via settings — embedded browser (JCEF) will not be initialized; WebView-based sources will fall back to direct network/FlareSolverr" }
+    } else {
+        // Synchronous JCEF initialization — must complete before any extension
+        // tries to create a WebView.  The Comix (and similar) extension calls
+        // runInWebView which creates a WebView on the main looper thread, which
+        // in turn calls CefAppBridge.getOrCreate().  If sharedApp is still null
+        // (because the old async init hadn't finished yet), the main looper blocks
+        // on the CefAppBuilder.build() lock, causing a 90+ second timeout and
+        // "Failed to start WebView" errors.
+        logger.info { "Initializing JCEF runtime — this may take a while" }
+        runCatching { KcefWebViewProvider.ensureRuntimeReady() }
+            .onSuccess {
+                logger.info { "JCEF runtime initialized" }
+            }
+            .onFailure { throwable ->
+                logger.warn(throwable) { "Unable to warm up KCEF runtime" }
+            }
+    }
 
     // AES/CBC/PKCS7Padding Cypher provider for zh.copymanga
     Security.addProvider(BouncyCastleProvider())

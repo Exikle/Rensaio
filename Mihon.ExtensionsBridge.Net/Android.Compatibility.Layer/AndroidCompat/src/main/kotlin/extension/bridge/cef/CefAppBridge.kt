@@ -34,7 +34,10 @@ object CefAppBridge {
             val app = initializer()
             sharedApp = app
             logger.info { "Initialized shared CefApp instance" }
-            CefMessageLoopBridge.start(app)
+            // The CEF message pump is intentionally NOT started here. It is started lazily from
+            // RendererGate.reserve() on the first browser creation so a process that never opens
+            // a WebView never spins a 100 Hz idle pump (see issue #87). The desktop host drives
+            // its own external pump via CefPumpBridge / the Avalonia DispatcherTimer.
             app
         }
     }

@@ -1,5 +1,6 @@
 package extension.bridge.cef
 
+import extension.bridge.Settings
 import extension.bridge.logging.AndroidCompatLogger
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
@@ -14,15 +15,28 @@ object CefMessageLoopBridge {
 
     /**
      * Enables or disables external pump mode.
-     * When enabled, [start] does not create the internal daemon thread;
+     * When enabled, [ensureStarted] does not create the internal daemon thread;
      * the caller must drive the message pump via [pumpWork].
      */
     fun setExternalPump(enabled: Boolean) {
         externalPumpEnabled = enabled
     }
 
+    private const val DEFAULT_ACTIVE_PUMP_INTERVAL_MS = 10L
+    private const val DEFAULT_IDLE_PUMP_INTERVAL_MS = 500L
     private const val SWEEP_INTERVAL_MS = 30_000L
     private val lastSweepMs = AtomicLong(0)
+
+    /**
+     * Current pump cadence based on live renderer count:
+     * browsers alive -> active (10 ms default); none alive -> idle (500 ms default).
+     * Intervals are configurable via `cefPumpActiveIntervalMs` / `cefPumpIdleIntervalMs`.
+     */
+    fun currentIntervalMs(): Long {
+        val active = Settings.cefPumpActiveIntervalMs.coerceAtLeast(1)
+        val idle = Settings.cefPumpIdleIntervalMs.coerceAtLeast(active)
+        return if (RendererGate.liveCount() > 0) active else idle
+    }
 
     /**
      * Performs one iteration of CEF message loop work.
@@ -56,7 +70,14 @@ object CefMessageLoopBridge {
         }
     }
 
-    fun start(app: CefApp) {
+    /**
+     * Starts the internal CEF message loop thread if it is not already running.
+     *
+     * Lazy: called from [RendererGate.reserve] on the first browser creation, NOT from CefApp
+     * initialization. When no browser is ever created, this thread never exists and the process
+     * burns no CPU on a perpetual 100 Hz pump.
+     */
+    fun ensureStarted(app: CefApp) {
         if (!running.compareAndSet(false, true)) return
 
         if (externalPumpEnabled) {
@@ -66,14 +87,20 @@ object CefMessageLoopBridge {
 
         loopThread =
             Thread({
-                logger.info { "Starting CEF message loop" }
+                logger.info { "Starting CEF message loop (active=${DEFAULT_ACTIVE_PUMP_INTERVAL_MS}ms idle=${DEFAULT_IDLE_PUMP_INTERVAL_MS}ms cadence)" }
                 try {
                     while (running.get()) {
                         pumpWork(app, 0L)
-                        Thread.sleep(10L)
+                        Thread.sleep(currentIntervalMs())
                     }
                 } catch (interrupted: InterruptedException) {
-                    Thread.currentThread().interrupt()
+                    if (running.get()) {
+                        // Nudge from RendererGate.reserve: clear the interrupt flag and re-check
+                        // the live renderer count so the pump drops to active cadence immediately.
+                        Thread.interrupted()
+                    } else {
+                        Thread.currentThread().interrupt()
+                    }
                 } catch (t: Throwable) {
                     logger.warn { "Error inside CEF message loop: ${'$'}t" }
                 } finally {
@@ -84,6 +111,14 @@ object CefMessageLoopBridge {
                 name = "cef-message-loop"
                 start()
             }
+    }
+
+    /**
+     * Wakes a sleeping pump thread so it re-evaluates the cadence immediately.
+     * Called by [RendererGate.reserve] when a new renderer is spawned.
+     */
+    fun notifyRendererSpawned() {
+        loopThread?.interrupt()
     }
 
     fun stop() {

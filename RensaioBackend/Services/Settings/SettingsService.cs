@@ -298,7 +298,10 @@ namespace RensaioBackend.Services.Settings
                     {
                         MaxRenderers = set.CefMaxRenderers,
                         IdleTimeoutMs = set.CefIdleTimeoutMs,
-                        WebViewPoolEnabled = set.CefWebViewPoolEnabled
+                        WebViewPoolEnabled = set.CefWebViewPoolEnabled,
+                        Enabled = set.CefEnabled,
+                        PumpActiveIntervalMs = set.CefPumpActiveIntervalMs,
+                        PumpIdleIntervalMs = set.CefPumpIdleIntervalMs
                     }
                 }, token).ConfigureAwait(false);
             }
@@ -349,6 +352,9 @@ namespace RensaioBackend.Services.Settings
                 CefMaxRenderers = settings.CefMaxRenderers,
                 CefIdleTimeoutMs = settings.CefIdleTimeoutMs,
                 CefWebViewPoolEnabled = settings.CefWebViewPoolEnabled,
+                CefEnabled = settings.CefEnabled,
+                CefPumpActiveIntervalMs = settings.CefPumpActiveIntervalMs,
+                CefPumpIdleIntervalMs = settings.CefPumpIdleIntervalMs,
                 IsWizardSetupComplete = settings.IsWizardSetupComplete,
                 WizardSetupStepCompleted = settings.WizardSetupStepCompleted,
                 SocksProxyEnabled = settings.SocksProxyEnabled,
@@ -394,6 +400,9 @@ namespace RensaioBackend.Services.Settings
                 CefMaxRenderers = ed.CefMaxRenderers,
                 CefIdleTimeoutMs = ed.CefIdleTimeoutMs,
                 CefWebViewPoolEnabled = ed.CefWebViewPoolEnabled,
+                CefEnabled = ed.CefEnabled,
+                CefPumpActiveIntervalMs = ed.CefPumpActiveIntervalMs,
+                CefPumpIdleIntervalMs = ed.CefPumpIdleIntervalMs,
                 IsWizardSetupComplete = ed.IsWizardSetupComplete,
                 WizardSetupStepCompleted = ed.WizardSetupStepCompleted,
                 SocksProxyEnabled = ed.SocksProxyEnabled,

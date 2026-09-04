@@ -18,7 +18,7 @@ import { userService } from "@/lib/api/services/userService";
 import { UserIcon, Upload } from "lucide-react";
 import { fetchGravatarBase64 } from "@/lib/gravatar";
 import { Badge } from "@/components/ui/badge";
-import { Plus, X, Save, Loader2, GripVertical } from "lucide-react";
+import { Plus, X, Save, Loader2, GripVertical, ChevronDown } from "lucide-react";
 import { useRouter } from "next/navigation";
 import {
   useSettings,
@@ -47,6 +47,11 @@ import {
 import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { RadioGroup, RadioGroupItem } from "../ui/radio-group";
+import {
+  Collapsible,
+  CollapsibleTrigger,
+  CollapsibleContent,
+} from "../ui/collapsible";
 
 // Helper functions
 const isValidUrl = (url: string): boolean => {
@@ -1200,6 +1205,130 @@ function SecuritySection({
   );
 }
 
+// Advanced CEF / embedded browser settings — collapsed by default so normal users
+// are not exposed to low-level JCEF tuning. These map to the backend DTO's cef*
+// fields and flow through the existing Settings API unchanged.
+function CefAdvancedSection({
+  localSettings,
+  setLocalSettings,
+}: {
+  localSettings: Settings;
+  setLocalSettings: (updater: (prev: Settings) => Settings) => void;
+}) {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <CardContent>
+      <Collapsible open={open} onOpenChange={setOpen}>
+        <CollapsibleTrigger asChild>
+          <Button variant="ghost" className="text-muted-foreground flex w-full justify-between px-0">
+            <span>Advanced</span>
+            <ChevronDown className={`h-4 w-4 transition-transform ${open ? "rotate-180" : ""}`} />
+          </Button>
+        </CollapsibleTrigger>
+        <CollapsibleContent className="space-y-4 pt-2">
+          <div className="flex items-center space-x-2">
+            <Switch
+              id="cef-enabled"
+              checked={localSettings.cefEnabled}
+              onCheckedChange={(checked) =>
+                setLocalSettings((prev) => ({ ...prev, cefEnabled: checked }))
+              }
+            />
+            <div>
+              <Label htmlFor="cef-enabled">Enable Embedded Browser (CEF/JCEF)</Label>
+              <p className="text-muted-foreground mt-1 text-sm">
+                Disabling reclaims ~512 MiB and all CEF CPU overhead, but sources requiring a
+                browser fall back to direct network / FlareSolverr. Requires restart.
+              </p>
+            </div>
+          </div>
+
+          <div className="grid gap-4 md:grid-cols-2">
+            <div>
+              <Label htmlFor="cef-max-renderers">Max Renderer Processes</Label>
+              <Input
+                id="cef-max-renderers"
+                type="number"
+                min="1"
+                value={localSettings.cefMaxRenderers}
+                onChange={(e) =>
+                  setLocalSettings((prev) => ({
+                    ...prev,
+                    cefMaxRenderers: Math.max(1, parseInt(e.target.value) || 1),
+                  }))
+                }
+              />
+            </div>
+            <div>
+              <Label htmlFor="cef-idle-timeout">Pool Idle Timeout (ms)</Label>
+              <Input
+                id="cef-idle-timeout"
+                type="number"
+                min="1000"
+                value={localSettings.cefIdleTimeoutMs}
+                onChange={(e) =>
+                  setLocalSettings((prev) => ({
+                    ...prev,
+                    cefIdleTimeoutMs: Math.max(1000, parseInt(e.target.value) || 300000),
+                  }))
+                }
+              />
+            </div>
+            <div>
+              <Label htmlFor="cef-pump-active">Message Pump Active Interval (ms)</Label>
+              <Input
+                id="cef-pump-active"
+                type="number"
+                min="1"
+                value={localSettings.cefPumpActiveIntervalMs}
+                onChange={(e) =>
+                  setLocalSettings((prev) => ({
+                    ...prev,
+                    cefPumpActiveIntervalMs: Math.max(1, parseInt(e.target.value) || 10),
+                  }))
+                }
+              />
+              <p className="text-muted-foreground mt-1 text-sm">
+                While browsers are alive (default 10 ms).
+              </p>
+            </div>
+            <div>
+              <Label htmlFor="cef-pump-idle">Message Pump Idle Interval (ms)</Label>
+              <Input
+                id="cef-pump-idle"
+                type="number"
+                min="50"
+                value={localSettings.cefPumpIdleIntervalMs}
+                onChange={(e) =>
+                  setLocalSettings((prev) => ({
+                    ...prev,
+                    cefPumpIdleIntervalMs: Math.max(50, parseInt(e.target.value) || 500),
+                  }))
+                }
+              />
+              <p className="text-muted-foreground mt-1 text-sm">
+                When no browser is open (default 500 ms) — reduces idle CPU burn.
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center space-x-2">
+            <Switch
+              id="cef-pool-enabled"
+              checked={localSettings.cefWebViewPoolEnabled}
+              onCheckedChange={(checked) =>
+                setLocalSettings((prev) => ({ ...prev, cefWebViewPoolEnabled: checked }))
+              }
+            />
+            <Label htmlFor="cef-pool-enabled">WebView Pooling / Reuse</Label>
+          </div>
+        </CollapsibleContent>
+      </Collapsible>
+    </CardContent>
+  );
+}
+
 // Available settings sections
 const AVAILABLE_SECTIONS: SettingsSection[] = [
   {
@@ -1249,6 +1378,12 @@ const AVAILABLE_SECTIONS: SettingsSection[] = [
     title: "Socks Settings",
     description: "Configure SOCKS proxy settings for sources requests.",
     component: SocksSettingsSection,
+  },
+  {
+    id: "advanced-cef",
+    title: "Advanced",
+    description: "Embedded browser and message-pump tuning. Changes marked (restart) apply on next start.",
+    component: CefAdvancedSection,
   },
 ];
 

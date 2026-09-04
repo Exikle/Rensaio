@@ -77,6 +77,25 @@ namespace Mihon.ExtensionsBridge.Core.Utilities
         }
 
         /// <summary>
+        /// Returns the current adaptive pump cadence in milliseconds.
+        /// While browsers are alive this is the active interval (10 ms default); when no
+        /// renderer is alive it backs off to the idle interval (500 ms default). The desktop
+        /// DispatcherTimer uses this to match the internal pump cadence so an idle process
+        /// stops burning ~11% of a core on a permanent 100 Hz poll (issue #87).
+        /// </summary>
+        public static long CurrentIntervalMs()
+        {
+            try
+            {
+                return CefMessageLoopBridge.INSTANCE.currentIntervalMs();
+            }
+            catch
+            {
+                return 500L;
+            }
+        }
+
+        /// <summary>
         /// Invalidates the cached CefApp reference (e.g. during shutdown).
         /// </summary>
         public static void Invalidate()
