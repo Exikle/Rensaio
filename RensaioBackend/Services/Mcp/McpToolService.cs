@@ -62,7 +62,7 @@ public class McpToolService
     private readonly DownloadQueryService _downloadQuery;
     private readonly JobManagementService _jobManagement;
     private readonly SettingsService _settings;
-    private readonly ScrobblerProviderFactory _scrobblerFactory;
+    private readonly ExternalSeriesProviderFactory _scrobblerFactory;
 
     private static readonly JsonSerializerOptions _jsonOptions = new()
     {
@@ -82,7 +82,7 @@ public class McpToolService
         DownloadQueryService downloadQuery,
         JobManagementService jobManagement,
         SettingsService settings,
-        ScrobblerProviderFactory scrobblerFactory)
+        ExternalSeriesProviderFactory scrobblerFactory)
     {
         _permissionService = permissionService;
         _db = db;

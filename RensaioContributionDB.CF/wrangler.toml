@@ -1,6 +1,7 @@
 name = "rensaio-contribution-db"
 main = "src/index.ts"
 compatibility_date = "2026-06-01"
+compatibility_flags = ["nodejs_compat"]
 
 # Custom domain route — contrib.rensaio.net
 routes = [
@@ -20,13 +21,14 @@ crons = ["0 6 * * *"]
 [vars]
 EXPORT_GITHUB_REPO = "maxpiva/Rensaio-Metadata"
 EXPORT_PATH = "/"
+EXPORT_COMPRESSION = "0"   # 0 = ZSTD, 1 = Brotli
 
 # Secrets (sensitive) — set via: wrangler secret put
 #   wrangler secret put GITHUB_TOKEN
 #   wrangler secret put AESKEY256IV   # base64(32B AES-256 key + 16B IV)
 
 [env.dev]
-vars = { EXPORT_GITHUB_REPO = "maxpiva/Rensaio-Metadata", EXPORT_PATH = "/" }
+vars = { EXPORT_GITHUB_REPO = "maxpiva/Rensaio-Metadata", EXPORT_PATH = "/", EXPORT_COMPRESSION = "0" }
 AESKEY256IV = ""
 
 [observability]

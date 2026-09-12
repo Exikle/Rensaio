@@ -19,41 +19,52 @@ export function LazyImage({
   loading = 'lazy',
   threshold = 0.1,
   ...props 
-}: LazyImageProps) {  const [imageSrc, setImageSrc] = useState<string | null>(null);
+}: LazyImageProps) {
+  const [imageSrc, setImageSrc] = useState<string | null>(null);
   const [isLoaded, setIsLoaded] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const observerRef = useRef<IntersectionObserver | null>(null);
+  const loadStartedRef = useRef(false);
 
+  // Reset internal state whenever a new src is requested.
   useEffect(() => {
-    // If loading is eager, load immediately
-    if (loading === 'eager') {
+    setImageSrc(null);
+    setIsLoaded(false);
+    loadStartedRef.current = false;
+  }, [src]);
+
+  // Decide *once* whether to load — keyed only on src/loading/threshold so that
+  // the fallback swap in handleError can never re-trigger loading of the original src.
+  useEffect(() => {
+    if (loading === 'eager' || typeof window === 'undefined' || !('IntersectionObserver' in window)) {
       setImageSrc(src);
+      loadStartedRef.current = true;
       return;
     }
 
-    // Create intersection observer for lazy loading
-    if (typeof window !== 'undefined' && 'IntersectionObserver' in window) {      observerRef.current = new IntersectionObserver(        (entries) => {          entries.forEach((entry) => {
-            if (entry.isIntersecting && !imageSrc) {
-              setImageSrc(src);
-              // Disconnect observer after loading starts
-              if (observerRef.current && containerRef.current) {
-                observerRef.current.unobserve(containerRef.current);
-              }
-            }
-          });
-        },
-        {
-          threshold,
-          rootMargin: '50px', // Start loading 50px before the image enters viewport
-        }
-      );
+    if (loadStartedRef.current) return;
 
-      if (containerRef.current) {
-        observerRef.current.observe(containerRef.current);
+    observerRef.current = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          if (entry.isIntersecting) {
+            setImageSrc(src);
+            loadStartedRef.current = true;
+            // Disconnect observer after loading starts
+            if (observerRef.current && containerRef.current) {
+              observerRef.current.unobserve(containerRef.current);
+            }
+          }
+        });
+      },
+      {
+        threshold,
+        rootMargin: '50px', // Start loading 50px before the image enters viewport
       }
-    } else {
-      // Fallback for browsers without IntersectionObserver
-      setImageSrc(src);
+    );
+
+    if (containerRef.current) {
+      observerRef.current.observe(containerRef.current);
     }
 
     return () => {
@@ -61,16 +72,19 @@ export function LazyImage({
         observerRef.current.disconnect();
       }
     };
-  }, [src, loading, threshold, imageSrc]);  const handleLoad = () => {
+  }, [src, loading, threshold]);
+
+  const handleLoad = () => {
     setIsLoaded(true);
   };
 
   const handleError = () => {
     setIsLoaded(true);
-    if (imageSrc !== fallbackSrc) {
-      setImageSrc(fallbackSrc);
-    }
-  };return (
+    // Degrade to the fallback exactly once; never revert back to the original src.
+    setImageSrc((current) => (current === src ? fallbackSrc : current));
+  };
+
+  return (
     <div ref={containerRef} className={`relative overflow-hidden ${className}`}>
       {/* Placeholder while loading */}
       {!isLoaded && (

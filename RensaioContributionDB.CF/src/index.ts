@@ -2,8 +2,10 @@ import { Hono } from 'hono';
 import type { Env } from './types';
 import contributorRoutes from './routes/contributor';
 import uploadRoutes from './routes/upload';
+import snapshotRoutes from './routes/snapshot';
 import adminRoutes from './routes/admin';
 import keyRoutes from './routes/key';
+import replicationRoutes from './routes/replication';
 import { runDailyExport } from './services/export-service';
 
 /**
@@ -11,17 +13,20 @@ import { runDailyExport } from './services/export-service';
  *
  * HTTP endpoints:
  *   GET  /contributor?contributor={UUID}  → validate a contributor
- *   POST /contributor?admin={adminUUID}   → create a contributor (first is auto-admin)
- *   POST /upload?contributor={UUID}       → submit a contribution batch
+ *   POST /upload?contributor={UUID}       → submit a ContributionSnapshotV1 batch
  *   POST /admin/ban?admin={adminUUID}     → ban a contributor (admin only)
- *   POST /admin/clean?admin={adminUUID}   → wipe sources/metadata/titles (admin only)
+ *   POST /admin/clean?admin={adminUUID}   → wipe data tables (admin only)
  *   POST /admin/export?admin={adminUUID}  → run the GitHub export now (admin only)
- *   GET  /key                            → return the AES key+IV (obfuscation secret, no auth)
+ *   GET  /key                            → return the AES key+IV (encryption secret)
+ *   GET  /replication                    → return the current Replication Version Number
  *
- * Scheduled (cron 06:00 UTC daily — handled via the `scheduled` event,
- * NOT an HTTP route; there is intentionally no public /__scheduled endpoint):
+ * Scheduled (cron 06:00 UTC daily — handled via the `scheduled` event):
  *   1. Scrub archived records older than the retention window (hard-delete)
- *   2. Export latest state to GitHub (sources.json, metadata.json, titles.json)
+ *   2. Bump the Replication Version Number
+ *   3. Export the snapshot as protobuf → compress → AES → metadata.bin to GitHub
+ *
+ * NOTE: contributor auto-creation is no longer supported — contributors are
+ * seeded out-of-band (D1).
  */
 
 const app = new Hono<{ Bindings: Env }>();
@@ -34,8 +39,10 @@ app.get('/health', (c) => {
 // ── Routes ──
 app.route('/contributor', contributorRoutes);
 app.route('/upload', uploadRoutes);
+app.route('/snapshot', snapshotRoutes);
 app.route('/admin', adminRoutes);
 app.route('/key', keyRoutes);
+app.route('/replication', replicationRoutes);
 
 // ── Catch-all 404 ──
 app.notFound((c) => {
@@ -61,6 +68,8 @@ async function scheduled(_controller: ScheduledController, env: Env, ctx: Execut
         console.log(
           `Cron export: scrubbed ${JSON.stringify(result.scrubbed)}, ` +
             `orphan titles archived ${result.orphanTitlesArchived}, ` +
+            `version ${result.version}, ` +
+            `compression ${result.compression}, ` +
             `pushed ${result.files.join(', ')}`
         );
       } catch (err) {

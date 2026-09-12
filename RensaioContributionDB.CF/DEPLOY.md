@@ -73,14 +73,14 @@ npx wrangler secret put GITHUB_TOKEN
 
 The token needs `repo` scope (or `Contents: Read and write` for fine-grained tokens) to update files in the target repository.
 
-### Set the AES Obfuscation Secret (sensitive — via wrangler secret)
+### Set the AES Encryption Secret (sensitive — via wrangler secret)
 
 ```powershell
 npx wrangler secret put AESKEY256IV
 # Paste base64(32-byte AES-256 key + 16-byte IV), press Enter
 ```
 
-`AESKEY256IV` is a base64 string of the AES-256 key (32 bytes) concatenated with the IV (16 bytes) — 48 bytes total, 64 base64 characters. It is used to **obfuscate** (not secure) source data in `sources.json` exports. The key is public by design: consumers fetch it from `GET /key`.
+`AESKEY256IV` is a base64 string of the AES-256 key (32 bytes) concatenated with the IV (16 bytes) — 48 bytes total, 64 base64 characters. It is used to **encrypt** the daily `metadata.bin` export (AES-256-CBC over the tagged+compressed protobuf stream). Consumers fetch it from `GET /key` to reverse the transform.
 
 Example generation (PowerShell):
 ```powershell
@@ -92,25 +92,21 @@ $key = New-Object byte[] 32; $iv = New-Object byte[] 16
 
 ---
 
-## Step 5: Bootstrap the First Admin
+## Step 5: Seed Contributors (out-of-band)
 
-The first contributor is created via the API when the `contributors` table is empty. Call `POST /contributor` with **no admin UUID** — the first created contributor automatically becomes an admin:
-
-```powershell
-curl -X POST https://contrib.rensaio.net/contributor
-  -H "Content-Type: application/json"
-  -d '{}'
-# → 201 {"contributor_id":"<first-admin-uuid>"}
-```
-
-Save the returned UUID — it is your first administrator. From now on, creating additional contributors requires this admin UUID (see `POST /contributor` in the API Reference below).
-
-If you prefer, you can still seed contributors directly in D1 (Cloudflare Dashboard → D1 → rensaio-contribution-db → Console):
+> **Contributor auto-creation is no longer supported** — `POST /contributor` returns **410**. Contributors are seeded directly in D1 (Cloudflare Dashboard → D1 → rensaio-contribution-db → Console):
 
 ```sql
+-- First admin (issue this once)
 INSERT INTO contributors (id, admin, active, ban_reason, last_change)
-VALUES ('<uuid>', 1, 1, NULL, datetime('now'));
+VALUES ('<admin-uuid>', 1, 1, NULL, datetime('now'));
+
+-- Regular contributors
+INSERT INTO contributors (id, admin, active, ban_reason, last_change)
+VALUES ('<contributor-uuid>', 0, 1, NULL, datetime('now'));
 ```
+
+Generate UUIDs with `uuidgen` (or any UUID v4 generator). These UUIDs are the credentials clients use in the `?contributor=` query parameter.
 
 ---
 

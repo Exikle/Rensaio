@@ -13,14 +13,14 @@ public interface ITokenStorageService
     /// Encrypts and stores the initial OAuth token result for a user+provider.
     /// Creates a new config row or updates an existing one.
     /// </summary>
-    Task StoreTokenResultAsync(Guid userId, ScrobblerProvider providerType,
+    Task StoreTokenResultAsync(Guid userId, ExternalSeriesProvider providerType,
         ScrobblerTokenResult tokenResult, CancellationToken token = default);
 
     /// <summary>
     /// Loads and decrypts the stored refresh token for a user+provider.
     /// Returns null if no refresh token exists.
     /// </summary>
-    Task<string?> GetRefreshTokenAsync(Guid userId, ScrobblerProvider providerType,
+    Task<string?> GetRefreshTokenAsync(Guid userId, ExternalSeriesProvider providerType,
         CancellationToken token = default);
 
     /// <summary>
@@ -28,13 +28,13 @@ public interface ITokenStorageService
     /// Returns all three, or nulls for missing values.
     /// </summary>
     Task<(string? accessToken, string? refreshToken, DateTime? expiresAt)> LoadTokensAsync(
-        Guid userId, ScrobblerProvider providerType, CancellationToken token = default);
+        Guid userId, ExternalSeriesProvider providerType, CancellationToken token = default);
 
     /// <summary>
     /// Persists refreshed tokens (access + optional refresh + optional expiry) for a user+provider.
     /// The tokens must already be encrypted before calling this method.
     /// </summary>
-    Task PersistRefreshedTokensAsync(Guid userId, ScrobblerProvider providerType,
+    Task PersistRefreshedTokensAsync(Guid userId, ExternalSeriesProvider providerType,
         string encryptedAccessToken, string? encryptedRefreshToken, DateTime? expiresAt,
         CancellationToken token = default);
 }

@@ -30,3 +30,17 @@ export const useUpdateSettings = () => {
     },
   });
 };
+
+/**
+ * Verifies a Contributor Id against RensaioContributionDB.CF via the backend.
+ * The backend persists `contributionVerified=true` (plus the id/server URL) in
+ * settings. We deliberately do NOT invalidate the settings query here: the
+ * SettingsManager form holds the authoritative local state (id + verified flag),
+ * and a background refetch would clobber the textbox mid-edit.
+ */
+export const useVerifyContributor = () => {
+  return useMutation({
+    mutationFn: (args: { serverUrl: string; contributorId: string }) =>
+      settingsService.verifyContributor(args.serverUrl, args.contributorId),
+  });
+};

@@ -102,6 +102,32 @@ public class EditableSettingsDto
 
     [JsonPropertyName("externalDomain")]
     public string ExternalDomain { get; set; } = string.Empty;
+
+    // --- Contribution Settings ---
+
+    [JsonPropertyName("contributionEnabled")]
+    public bool ContributionEnabled { get; set; } = false;
+
+    /// <summary>
+    /// Base URL of the Cloudflare contribution worker, e.g. https://contribution.rensaio.net
+    /// </summary>
+    [JsonPropertyName("contributionServerUrl")]
+    public string ContributionServerUrl { get; set; } = "https://contribution.rensaio.net";
+
+    /// <summary>
+    /// Contributor UUID used to authenticate against the worker's /upload?contributor={id}.
+    /// </summary>
+    [JsonPropertyName("contributionContributorId")]
+    public string ContributionContributorId { get; set; } = string.Empty;
+
+    /// <summary>
+    /// True when the configured Contributor Id was verified against the cloud
+    /// contribution database (RensaioContributionDB.CF) and the contributor is
+    /// active. This flag is server-computed on save — clients cannot set it
+    /// directly. All contribution features require it to be true.
+    /// </summary>
+    [JsonPropertyName("contributionVerified")]
+    public bool ContributionVerified { get; set; } = false;
 }
 public enum NsfwVisibility
 {

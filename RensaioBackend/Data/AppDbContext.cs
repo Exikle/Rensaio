@@ -2,12 +2,11 @@ using RensaioBackend.Models;
 using RensaioBackend.Models.Database;
 using RensaioBackend.Models.Enums;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.EntityFrameworkCore.ChangeTracking;
 using Microsoft.EntityFrameworkCore.Design;
 using Mihon.ExtensionsBridge.Models.Extensions;
-using System.Text.Json;
 using System.Text.Json.Serialization;
 using Chapter = RensaioBackend.Models.Chapter;
+using RensaioBackend.Data.Converters;
 
 namespace RensaioBackend.Data
 {
@@ -22,66 +21,12 @@ namespace RensaioBackend.Data
             return new AppDbContext(options);
         }
     }
-    public static class GenericValueComparer
-    {
-        public static ValueComparer<T> Create<T>()
-        {
-            return typeof(T).IsGenericType &&
-                   typeof(T).GetGenericTypeDefinition() == typeof(List<>)
-                ? CreateListComparer<T>()
-                : new ValueComparer<T>(
-                    (a, b) => EqualityComparer<T>.Default.Equals(a, b),
-                    a => a == null ? 0 : EqualityComparer<T>.Default.GetHashCode(a),
-                    a => a
-                );
-        }
-
-        private static ValueComparer<T> CreateListComparer<T>()
-        {
-            var elementType = typeof(T).GetGenericArguments()[0];
-
-            return new ValueComparer<T>(
-                (a, b) => SequenceEqual(a, b),
-                a => GetSequenceHashCode(a),
-                a => CloneList(a)
-            );
-        }
-
-        private static bool SequenceEqual<T>(T? a, T? b)
-        {
-            if (a is IEnumerable<object> listA && b is IEnumerable<object> listB)
-                return listA.SequenceEqual(listB);
-            return EqualityComparer<T>.Default.Equals(a, b);
-        }
-
-        private static int GetSequenceHashCode<T>(T? list)
-        {
-            if (list is IEnumerable<object> sequence)
-                return sequence.Aggregate(0, (hash, item) => HashCode.Combine(hash, item?.GetHashCode() ?? 0));
-            return list?.GetHashCode() ?? 0;
-        }
-
-        private static T CloneList<T>(T? list)
-        {
-            if (list is IEnumerable<object> source && list is IList<object> original)
-            {
-                var cloned = Activator.CreateInstance(typeof(T)) as IList<object>;
-                foreach (var item in original)
-                    cloned?.Add(item);
-                return (T)(object)cloned!;
-            }
-
-            return list!;
-        }
-    }
-
     public class AppDbContext : DbContext
     {
         public AppDbContext(DbContextOptions<AppDbContext> options) : base(options)
         {
          
         }
-
         public DbSet<SeriesEntity> Series { get; set; }
         public DbSet<SettingEntity> Settings { get; set; }
         public DbSet<SeriesProviderEntity> SeriesProviders { get; set; }
@@ -94,7 +39,6 @@ namespace RensaioBackend.Data
         public DbSet<HealthStatusEntity> HealthStatuses { get; set; }
         public DbSet<UserEntity> Users { get; set; }
         public DbSet<UserScrobblerConfigEntity> UserScrobblerConfigs { get; set; }
-        public DbSet<UserSeriesMappingEntity> UserSeriesMappings { get; set; }
         public DbSet<SeriesMappingEntity> SeriesMappings { get; set; }
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
@@ -115,15 +59,26 @@ namespace RensaioBackend.Data
                 entity.Property(s => s.ChapterCount).IsRequired();
                 entity.Property(s => s.PauseDownloads).IsRequired();
                 entity.Property(s => s.LastChapterDate).IsRequired(false);
-                entity.Property(s => s.Genre)
-                    .HasConversion(
-                        v => string.Join(',', v),
-                        v => v.Split(',', StringSplitOptions.RemoveEmptyEntries).ToList()
-                    ).Metadata.SetValueComparer(GenericValueComparer.Create<List<string>>());
-                entity.HasMany(s => s.Sources)
-                    .WithOne()
-                    .HasForeignKey(sp => sp.SeriesId)
-                    .OnDelete(DeleteBehavior.Cascade);
+                entity.Property(s => s.Genre).HasStringSplit();
+                entity.HasMany(s => s.Sources).WithOne().HasForeignKey(sp => sp.SeriesId).OnDelete(DeleteBehavior.Cascade);
+            });
+
+            modelBuilder.Entity<SeriesMappingEntity>(entity =>
+            {
+                entity.HasKey(m => m.Id);
+                entity.Property(m => m.SeriesId).IsRequired(false); // nullable to support series-less/provider-scoped rows
+                entity.Property(m => m.Provider).IsRequired();
+                entity.Property(m => m.ExternalSeriesId).UseCollation("BINARY").IsRequired();
+                entity.Property(m => m.ExternalSeriesTitle).UseCollation("BINARY").IsRequired(false);
+                entity.Property(m => m.MetaData).UseCollation("BINARY").IsRequired(false);
+                entity.Property(m => m.UserUid).IsRequired(false);
+                entity.Property(m => m.UserRole).IsRequired();
+                entity.Property(m => m.UpdateDate).IsRequired();
+                // LinkedSitesIds: comma-separated "site:id" strings in a TEXT column
+                entity.Property(m => m.LinkedSitesIds).HasStringSplit();
+                // AlternativeTitles: JSON-encoded string[] in a TEXT column
+                entity.Property(m => m.AlternativeTitles).HasJsonConversion<List<string>>(); 
+                entity.HasIndex(m => new { m.SeriesId, m.Provider }).IsUnique().HasDatabaseName("IX_SeriesMapping_SeriesId_Provider");
             });
 
             modelBuilder.Entity<SeriesProviderEntity>(entity =>
@@ -142,12 +97,7 @@ namespace RensaioBackend.Data
                 entity.Property(sp => sp.Artist).UseCollation("BINARY").IsRequired(false);
                 entity.Property(sp => sp.Author).UseCollation("BINARY").IsRequired(false);
                 entity.Property(sp => sp.Description).UseCollation("BINARY").IsRequired(false);
-                entity.Property(sp => sp.Genre)
-                    .HasConversion(
-                        v => string.Join(',', v),
-                        v => v.Split(',', StringSplitOptions.RemoveEmptyEntries).ToList()
-                    ).Metadata.SetValueComparer(GenericValueComparer.Create<List<string>>());
- 
+                entity.Property(sp => sp.Genre).HasStringSplit(); 
                 entity.Property(sp => sp.FetchDate).IsRequired(false);
                 entity.Property(sp => sp.ChapterCount).IsRequired(false);
                 entity.Property(sp => sp.ContinueAfterChapter).IsRequired(false);
@@ -164,18 +114,12 @@ namespace RensaioBackend.Data
                 entity.Property(sp => sp.LastSuccessfulFetchDate).IsRequired(false);
                 entity.Property(sp => sp.LastSeriesInfoRefreshDate).IsRequired(false);
                 entity.Property(sp => sp.LastKnownStatus).IsRequired(false);
-                entity.Property(sp => sp.Chapters)
-                     .HasConversion(
-                         v => JsonSerializer.Serialize(v, new JsonSerializerOptions { WriteIndented = false }),
-                         v => JsonSerializer.Deserialize<List<Chapter>>(v, new JsonSerializerOptions { WriteIndented = false }) ?? new List<Chapter>()
-                     ).Metadata.SetValueComparer(GenericValueComparer.Create<List<Chapter>>());
+                entity.Property(sp => sp.Chapters).HasJsonConversion<List<Chapter>>();
                 entity.HasIndex(sp => sp.SeriesId).HasDatabaseName("IX_SeriesProvider_SeriesId");
                 entity.HasIndex(sp => sp.MihonId).HasDatabaseName("IX_SeriesProvider_MihonId");
                 entity.HasIndex(sp => sp.MihonProviderId).HasDatabaseName("IX_SeriesProvider_MihonProviderId");
-                entity.HasIndex(sp => new { sp.Title, sp.Language })
-                    .HasDatabaseName("IX_SeriesProvider_Title_Language");
-                entity.HasIndex(sp => new { sp.Provider, sp.Language, sp.Scanlator })
-                    .HasDatabaseName("IX_SeriesProvider_Provider_Language_Scanlator");
+                entity.HasIndex(sp => new { sp.Title, sp.Language }).HasDatabaseName("IX_SeriesProvider_Title_Language");
+                entity.HasIndex(sp => new { sp.Provider, sp.Language, sp.Scanlator }).HasDatabaseName("IX_SeriesProvider_Provider_Language_Scanlator");
             });
 
             modelBuilder.Entity<LatestSerieEntity>(entity =>
@@ -192,16 +136,8 @@ namespace RensaioBackend.Data
                 entity.Property(e => e.Artist).UseCollation("BINARY").IsRequired(false);
                 entity.Property(e => e.Author).UseCollation("BINARY").IsRequired(false);
                 entity.Property(e => e.Description).UseCollation("BINARY").IsRequired(false);
-                entity.Property(e => e.Genre)
-                    .HasConversion(
-                        v => string.Join(',', v),
-                        v => v.Split(',', StringSplitOptions.RemoveEmptyEntries).ToList()
-                    ).Metadata.SetValueComparer(GenericValueComparer.Create<List<string>>());
-                entity.Property(e => e.Chapters)
-                    .HasConversion(
-                        v => JsonSerializer.Serialize(v, new JsonSerializerOptions { WriteIndented = false }),
-                        v => JsonSerializer.Deserialize<List<ParsedChapter>>(v, new JsonSerializerOptions { WriteIndented = false }) ?? new List<ParsedChapter>()
-                    ).Metadata.SetValueComparer(GenericValueComparer.Create<List<ParsedChapter>>());
+                entity.Property(e => e.Genre).HasStringSplit();
+                entity.Property(e => e.Chapters).HasJsonConversion<List<ParsedChapter>>();
                 entity.Property(e => e.FetchDate).IsRequired();
                 entity.Property(e => e.ChapterCount).IsRequired(false);
                 entity.Property(e => e.LatestChapter).IsRequired(false);
@@ -229,26 +165,11 @@ namespace RensaioBackend.Data
                 entity.HasKey(i => i.Path);
                 entity.Property(i => i.Path).UseCollation("BINARY").IsRequired();
                 entity.Property(i => i.Title).UseCollation("BINARY").IsRequired();
-                entity.Property(i => i.Status)
-                    .IsRequired()
-                    .HasDefaultValue(ImportStatus.Import)
-                    .HasConversion<int>();
-                entity.Property(i => i.Action)
-                    .IsRequired()
-                    .HasDefaultValue(Models.Action.Add)
-                    .HasConversion<int>();
-                entity.Property(i => i.Info)
-                    .HasConversion(
-                        v => JsonSerializer.Serialize(v, new JsonSerializerOptions { WriteIndented = false }),
-                        v => JsonSerializer.Deserialize<ImportSeriesSnapshot>(v, new JsonSerializerOptions { WriteIndented = false }) ?? new ImportSeriesSnapshot()
-                    ).Metadata.SetValueComparer(GenericValueComparer.Create<ImportSeriesSnapshot>());
-                entity.Property(i => i.Series)
-                    .HasConversion(
-                        v => JsonSerializer.Serialize(v, new JsonSerializerOptions { WriteIndented = false }),
-                        v => JsonSerializer.Deserialize<List<ProviderSeriesDetails>>(v, new JsonSerializerOptions { WriteIndented = false }) ?? new List<ProviderSeriesDetails>()
-                    ).Metadata.SetValueComparer(GenericValueComparer.Create<List<ProviderSeriesDetails>>());
-                entity.HasIndex(i => new { i.Status, i.Action })
-                    .HasDatabaseName("IX_Import_Status_Action");
+                entity.Property(i => i.Status).IsRequired().HasDefaultValue(ImportStatus.Import).HasConversion<int>();
+                entity.Property(i => i.Action).IsRequired().HasDefaultValue(Models.Action.Add).HasConversion<int>();
+                entity.Property(i => i.Info).HasJsonConversion<ImportSeriesSnapshot>();
+                entity.Property(i => i.Series).HasJsonConversion<List<ProviderSeriesDetails>>();
+                entity.HasIndex(i => new { i.Status, i.Action }).HasDatabaseName("IX_Import_Status_Action");
             });
 
             modelBuilder.Entity<EtagCacheEntity>(entity =>
@@ -276,24 +197,17 @@ namespace RensaioBackend.Data
                 entity.Property(j => j.Key).UseCollation("BINARY").IsRequired();
                 entity.Property(j => j.GroupKey).UseCollation("BINARY").IsRequired();
                 entity.Property(j => j.JobParameters).UseCollation("BINARY").IsRequired();
-                entity.Property(j => j.JobType)
-                    .IsRequired()
-                    .HasConversion<int>();
-                entity.Property(j => j.Priority)
-                    .IsRequired()
-                    .HasDefaultValue(Priority.Low)
-                    .HasConversion<int>();
+                entity.Property(j => j.JobType).IsRequired().HasConversion<int>();
+                entity.Property(j => j.Priority).IsRequired().HasDefaultValue(Priority.Low).HasConversion<int>();
                 entity.Property(j => j.TimeBetweenJobs).IsRequired();
                 entity.Property(j => j.MinutePlace).IsRequired();
                 entity.Property(j => j.NextExecution).IsRequired();
                 entity.Property(j => j.PreviousExecution).IsRequired(false);
                 entity.HasIndex(j => j.Key);
                 entity.HasIndex(j => j.NextExecution);
-                entity.HasIndex(j => new { j.JobType, j.GroupKey })
-                    .HasDatabaseName("IX_Job_JobType_GroupKey");
+                entity.HasIndex(j => new { j.JobType, j.GroupKey }).HasDatabaseName("IX_Job_JobType_GroupKey");
                 entity.HasIndex(j => j.IsEnabled).HasDatabaseName("IX_Job_IsEnabled");
-                entity.HasIndex(j => new { j.JobType, j.Key })
-                    .HasDatabaseName("IX_Job_JobType_Key");
+                entity.HasIndex(j => new { j.JobType, j.Key }).HasDatabaseName("IX_Job_JobType_Key");
             });
 
             modelBuilder.Entity<EnqueueEntity>(entity =>
@@ -304,17 +218,9 @@ namespace RensaioBackend.Data
                 entity.Property(e => e.GroupKey).UseCollation("BINARY").IsRequired();
                 entity.Property(e => e.ExtraKey).UseCollation("BINARY").IsRequired(false);
                 entity.Property(e => e.JobParameters).UseCollation("BINARY").IsRequired(false);
-                entity.Property(e => e.JobType)
-                    .IsRequired()
-                    .HasConversion<int>();
-                entity.Property(e => e.Status)
-                    .IsRequired()
-                    .HasDefaultValue(QueueStatus.Waiting)
-                    .HasConversion<int>();
-                entity.Property(e => e.Priority)
-                    .IsRequired()
-                    .HasDefaultValue(Priority.Low)
-                    .HasConversion<int>();
+                entity.Property(e => e.JobType).IsRequired().HasConversion<int>();
+                entity.Property(e => e.Status).IsRequired().HasDefaultValue(QueueStatus.Waiting).HasConversion<int>();
+                entity.Property(e => e.Priority).IsRequired().HasDefaultValue(Priority.Low).HasConversion<int>();
                 entity.Property(e => e.EnqueuedDate).IsRequired();
                 entity.Property(e => e.StartedDate).IsRequired(false);
                 entity.Property(e => e.ScheduledDate).IsRequired();
@@ -324,10 +230,8 @@ namespace RensaioBackend.Data
                 entity.HasIndex(e => e.Status);
                 entity.HasIndex(e => e.Key);
                 entity.HasIndex(e => e.ScheduledDate);
-                entity.HasIndex(e => new { e.JobType, e.Status })
-                    .HasDatabaseName("IX_Enqueue_JobType_Status");
-                entity.HasIndex(e => new { e.JobType, e.ExtraKey })
-                    .HasDatabaseName("IX_Enqueue_JobType_ExtraKey");
+                entity.HasIndex(e => new { e.JobType, e.Status }).HasDatabaseName("IX_Enqueue_JobType_Status");
+                entity.HasIndex(e => new { e.JobType, e.ExtraKey }).HasDatabaseName("IX_Enqueue_JobType_ExtraKey");
                 entity.HasIndex(e => e.GroupKey).HasDatabaseName("IX_Enqueue_GroupKey");
                 entity.HasIndex(e => e.FinishedDate).HasDatabaseName("IX_Enqueue_FinishedDate");
             });
@@ -381,34 +285,25 @@ namespace RensaioBackend.Data
                 entity.Property(c => c.LastSyncAt).IsRequired(false);
                 entity.Property(c => c.LastUploadAt).IsRequired(false);
                 entity.Property(c => c.LastDownloadAt).IsRequired(false);
-                entity.HasIndex(c => new { c.UserId, c.Provider }).IsUnique()
-                    .HasDatabaseName("IX_UserScrobblerConfig_UserId_Provider");
-            });
-
-            modelBuilder.Entity<UserSeriesMappingEntity>(entity =>
-            {
-                entity.HasKey(m => m.Id);
-                entity.Property(m => m.UserId).IsRequired();
-                entity.Property(m => m.SeriesId).IsRequired();
-                entity.Property(m => m.Provider).IsRequired().HasConversion<int>();
-                entity.Property(m => m.ExternalSeriesId).UseCollation("BINARY").IsRequired();
-                entity.Property(m => m.ExternalSeriesTitle).UseCollation("BINARY").IsRequired(false);
-                entity.Property(m => m.MappingStatus).IsRequired().HasConversion<int>();
-                entity.HasIndex(m => new { m.UserId, m.SeriesId, m.Provider }).IsUnique()
-                    .HasDatabaseName("IX_UserSeriesMapping_UserId_SeriesId_Provider");
+                entity.HasIndex(c => new { c.UserId, c.Provider }).IsUnique().HasDatabaseName("IX_UserScrobblerConfig_UserId_Provider");
             });
 
             modelBuilder.Entity<SeriesMappingEntity>(entity =>
             {
                 entity.HasKey(m => m.Id);
-                entity.Property(m => m.SeriesId).IsRequired();
+                entity.Property(m => m.SeriesId).IsRequired(false); // nullable to support series-less/provider-scoped rows
                 entity.Property(m => m.Provider).IsRequired().HasConversion<int>();
                 entity.Property(m => m.ExternalSeriesId).UseCollation("BINARY").IsRequired();
                 entity.Property(m => m.ExternalSeriesTitle).UseCollation("BINARY").IsRequired(false);
+                entity.Property(m => m.SeriesCoverUrl).UseCollation("BINARY").IsRequired(false);
+                entity.Property(m => m.MetaData).UseCollation("BINARY").IsRequired(false);
+                entity.Property(m => m.LinkedSitesIds).HasStringSplit();
+                entity.Property(m => m.AlternativeTitles).HasJsonConversion<List<string>>();
+                entity.Property(m => m.MappingStatus).HasColumnType("INTEGER").IsRequired();
+                entity.Property(m => m.LinkedDate).IsRequired(false);
                 entity.Property(m => m.UserRole).IsRequired().HasConversion<int>();
                 entity.Property(m => m.UpdateDate).IsRequired();
-                entity.HasIndex(m => new { m.SeriesId, m.Provider }).IsUnique()
-                    .HasDatabaseName("IX_SeriesMapping_SeriesId_Provider");
+                entity.HasIndex(m => new { m.SeriesId, m.Provider }).IsUnique().HasDatabaseName("IX_SeriesMapping_SeriesId_Provider");
             });
         }
     }

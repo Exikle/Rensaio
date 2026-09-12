@@ -77,6 +77,9 @@ namespace RensaioBackend.Controllers
             try
             {
                 var sources = await _searchQueryService.GetAvailableSearchSourcesAsync(token).ConfigureAwait(false);
+                // Rewrite provider icons/thumbs through the image cache (Cloudflare bypass, etag + cache)
+                // before the search requester renders the source selectors.
+                await _thumbs.PopulateThumbsAsync(sources, "/api/image/", token).ConfigureAwait(false);
                 return Ok(sources.OrderBy(a=>a.Provider).ToList());
             }
             catch (Exception ex)

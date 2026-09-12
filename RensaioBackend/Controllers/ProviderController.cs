@@ -108,6 +108,7 @@ namespace RensaioBackend.Controllers
                 var prefs = await _preferencesService.GetProviderPreferencesAsync(pkgName, token).ConfigureAwait(false);
                 if (prefs != null)
                 {
+                    await _thumbs.PopulateThumbsAsync(prefs, "/api/image/", token).ConfigureAwait(false);
                     return Ok(prefs);
                 }
                 return BadRequest(new { error = "Provider not found" });

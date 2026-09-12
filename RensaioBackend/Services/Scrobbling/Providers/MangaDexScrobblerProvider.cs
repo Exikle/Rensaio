@@ -2,7 +2,9 @@ using System.Globalization;
 using RensaioBackend.Data;
 using RensaioBackend.Models.Dto;
 using RensaioBackend.Models.Enums;
+using RensaioBackend.Services.Metadata;
 using RensaioBackend.Services.Scrobbling.Abstractions;
+using RensaioBackend.Utils;
 using Microsoft.Extensions.Logging;
 using System.Collections.Concurrent;
 using System.Net.Http.Headers;
@@ -25,6 +27,7 @@ public class MangaDexScrobblerProvider : IScrobblerProvider
     private readonly ScrobblerConfiguration _config;
     private readonly ITokenStorageService _tokenStorage;
     private readonly ScrobblerTokenProtector _tokenProtector;
+    private readonly SeriesMetadataResolver _resolver;
     private string? _accessToken;
     private Guid? _userId;
     private string? _personalClientId;
@@ -33,7 +36,8 @@ public class MangaDexScrobblerProvider : IScrobblerProvider
     private const string AuthBase = "https://auth.mangadex.org/realms/mangadex/protocol/openid-connect";
     private const string ApiBase = "https://api.mangadex.org";
 
-    public ScrobblerProvider ProviderType => ScrobblerProvider.MangaDex;
+    public ExternalSeriesProvider ProviderType => ExternalSeriesProvider.MangaDex;
+    public ProviderFeatures Features => ProviderFeatures.Scrobbling | ProviderFeatures.Metadata;
     public string DisplayName => "MangaDex";
     public string? Icon => ProviderIcons.MangaDex;
     public string? Link => "https://mangadex.org/settings#api-clients";
@@ -61,13 +65,15 @@ private static ConcurrentDictionary<string, decimal> _dedupState = new();
         ILogger<MangaDexScrobblerProvider> logger,
         IConfiguration configuration,
         ITokenStorageService tokenStorage,
-        ScrobblerTokenProtector tokenProtector)
+        ScrobblerTokenProtector tokenProtector,
+        SeriesMetadataResolver resolver)
     {
         _httpClient = httpClientFactory.CreateClient("Scrobbler_MangaDex");
         _logger = logger;
         _config = configuration.GetSection("Scrobbling:MangaDex").Get<ScrobblerConfiguration>() ?? new ScrobblerConfiguration();
         _tokenStorage = tokenStorage;
         _tokenProtector = tokenProtector;
+        _resolver = resolver;
     }
 
     public void SetAccessToken(string accessToken, Guid userid)
@@ -243,6 +249,7 @@ private static ConcurrentDictionary<string, decimal> _dedupState = new();
 
     public async Task<List<ScrobblerSearchResult>> SearchSeriesAsync(string query, CancellationToken token = default)
     {
+        _logger.LogInformation("MangaDex: searching for '{Query}'", query);
         _httpClient.ApplyBearerToken(_accessToken);
 
         await EnforceRateLimitAsync();
@@ -261,7 +268,9 @@ private static ConcurrentDictionary<string, decimal> _dedupState = new();
             var attr = item.Attributes;
             if (attr == null) continue;
 
-            var altTitles = new List<string>();
+            var titleCandidates = new List<string?>();
+            if (attr.Title != null)
+                titleCandidates.AddRange(attr.Title.Values);
             if (attr.AltTitles != null)
             {
                 foreach (var alt in attr.AltTitles)
@@ -269,7 +278,7 @@ private static ConcurrentDictionary<string, decimal> _dedupState = new();
                     foreach (var kvp in alt)
                     {
                         if (kvp.Value is string s && !string.IsNullOrEmpty(s))
-                            altTitles.Add(s);
+                            titleCandidates.Add(s);
                     }
                 }
             }
@@ -281,13 +290,29 @@ private static ConcurrentDictionary<string, decimal> _dedupState = new();
                         ?? query;
 
             // Get cover URL from relationships
-            var coverUrl = GetCoverUrl(item.Relationships);
+            var coverUrl = GetCoverUrl(item.Id, item.Relationships);
+
+            // Cross-site linked IDs from the links object (al, mal, kt, mu, ...)
+            var linkedSites = new List<string> { $"mangadex:{item.Id}" };
+            if (attr.Links != null)
+            {
+                foreach (var kvp in attr.Links)
+                {
+                    var canonical = _resolver.NormalizeSiteSlug(kvp.Key, ProviderType);
+                    if (canonical != null && !string.IsNullOrWhiteSpace(kvp.Value))
+                    {
+                        var nid = _resolver.NormalizeId(canonical, kvp.Value) ?? kvp.Value;
+                        linkedSites.Add($"{canonical}:nid");
+                    }
+                }
+            }
 
             results.Add(new ScrobblerSearchResult
             {
                 ExternalId = item.Id,
                 Title = title,
-                AlternateTitles = altTitles,
+                AlternateTitles = TitleListBuilder.BuildAlternates(title, titleCandidates),
+                LinkedSitesIds = linkedSites.Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
                 CoverUrl = coverUrl,
                 Type = attr.PublicationDemographic ?? attr.OriginalLanguage,
                 ChapterCount = attr.LastChapter != null ? int.TryParse(attr.LastChapter, out var c) ? c : null : null,
@@ -298,6 +323,69 @@ private static ConcurrentDictionary<string, decimal> _dedupState = new();
         }
 
         return results;
+    }
+
+    /// <summary>
+    /// Fetches MangaDex manga detail (single /manga/{id}) + extracts alt titles + links.
+    /// </summary>
+    public async Task<SeriesMetadataResult?> FetchSeriesMetadataAsync(string externalSeriesId, CancellationToken token = default)
+    {
+        _logger.LogInformation("MangaDex: fetching metadata for id '{Id}'", externalSeriesId);
+        if (string.IsNullOrWhiteSpace(externalSeriesId)) return null;
+        try
+        {
+            _httpClient.ApplyBearerToken(_accessToken);
+            await EnforceRateLimitAsync();
+            var response = await _httpClient.GetAsync(
+                $"{ApiBase}/manga/{Uri.EscapeDataString(externalSeriesId)}?includes[]=manga&includes[]=cover_art&includes[]=author&includes[]=artist&includes[]=tag&includes[]=creator",
+                token);
+            if (!response.IsSuccessStatusCode) return null;
+            var payload = await response.Content.ReadFromJsonAsync<MdMangaEnvelope>(cancellationToken: token);
+            var manga = payload?.Data;
+            var attr = manga?.Attributes;
+            if (manga == null || attr == null) return null;
+
+            var titleCandidates = new List<string?>();
+            if (attr.Title != null) titleCandidates.AddRange(attr.Title.Values);
+            if (attr.AltTitles != null)
+            {
+                foreach (var alt in attr.AltTitles)
+                {
+                    foreach (var kvp in alt)
+                    {
+                        if (kvp.Value.ToString() is string s)
+                            titleCandidates.Add(s);
+                    }
+                }
+            }
+            var title = attr.Title?.GetValueOrDefault("en")
+                        ?? attr.Title?.GetValueOrDefault("ja")
+                        ?? (attr.Title != null ? attr.Title.Values.FirstOrDefault() : null)
+                        ?? externalSeriesId;
+            var linkedSites = new List<string> { $"mangadex:{manga.Id}" };
+            if (attr.Links != null)
+                foreach (var kvp in attr.Links)
+                {
+                    var canonical = _resolver.NormalizeSiteSlug(kvp.Key, ProviderType);
+                    if (canonical != null && !string.IsNullOrWhiteSpace(kvp.Value))
+                        linkedSites.Add($"{canonical}:{kvp.Value}");
+                }
+
+            return new SeriesMetadataResult
+            {
+                ExternalId = manga.Id ?? externalSeriesId,
+                Title = title,
+                MetaData = JsonSerializer.Serialize(attr),
+                LinkedSitesIds = linkedSites.Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
+                AlternativeTitles = TitleListBuilder.BuildAlternates(title, titleCandidates),
+                CoverUrl = GetCoverUrl(manga.Id, manga.Relationships)
+            };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "MangaDex detail failed for id '{Id}'", externalSeriesId);
+            return null;
+        }
     }
 
     public async Task<Dictionary<decimal, float>> GetReadChaptersAsync(string externalSeriesId, CancellationToken token = default)
@@ -396,7 +484,10 @@ private static ConcurrentDictionary<string, decimal> _dedupState = new();
         }
     }
 
-
+    public List<string> FilterLookupTitles(IEnumerable<string> titles)
+    {
+        return titles.ToList();
+    }
     public async Task<bool> ValidateTokenAsync(CancellationToken token = default)
     {
         try
@@ -445,12 +536,12 @@ private static ConcurrentDictionary<string, decimal> _dedupState = new();
     }
 
 
-    private static string? GetCoverUrl(List<MdRelationship>? relationships)
+    private static string? GetCoverUrl(string id, List<MdRelationship>? relationships)
     {
         if (relationships == null) return null;
         var coverRel = relationships.FirstOrDefault(r => r.Type == "cover_art");
         if (coverRel?.Attributes?.FileName == null) return null;
-        return $"https://uploads.mangadex.org/covers/{coverRel.Id}/{coverRel.Attributes.FileName}";
+        return $"https://mangadex.org/covers/{id}/{coverRel.Attributes.FileName}";
     }
 
     // ── JSON Models ──
@@ -480,11 +571,17 @@ private static ConcurrentDictionary<string, decimal> _dedupState = new();
         public List<MdRelationship>? Relationships { get; set; }
     }
 
+    private class MdMangaEnvelope
+    {
+        public MdMangaData? Data { get; set; }
+    }
+
     private class MdMangaAttributes
     {
         public Dictionary<string, string>? Title { get; set; }
         public List<Dictionary<string, object>>? AltTitles { get; set; }
         public Dictionary<string, string>? Description { get; set; }
+        public Dictionary<string, string>? Links { get; set; }
         public string? OriginalLanguage { get; set; }
         public string? PublicationDemographic { get; set; }
         public string? Status { get; set; }

@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -8,12 +8,14 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
-import { useScrobblerConfigs, useUpdateScrobblerConfig, useScrobblerAuthorize, useScrobblerCallback, useScrobblerDisconnect, useTriggerSync, useSyncStatus, useSaveComicVineApiKey, useKitsuDirectAuth, useMangaDexDirectAuth } from '@/lib/api/hooks/useScrobbler';
+import { useScrobblerConfigs, useUpdateScrobblerConfig, useScrobblerAuthorize, useScrobblerCallback, useScrobblerDisconnect, useTriggerSync, useSyncStatus, useSaveComicVineApiKey, useKitsuDirectAuth, useMangaDexDirectAuth, useMetadataLinkAll } from '@/lib/api/hooks/useScrobbler';
 import { useScrobblerUnmatched, useAutoMatchAll, useConfirmMatch, useDisableLink } from '@/lib/api/hooks/useScrobbler';
-import { ScrobblerProvider, type ScrobblerConfig, type OAuthCallbackRequest, type ScrobblerConfigUpdate } from '@/lib/api/types';
+import { ScrobblerProvider, ProviderFeatures, type ScrobblerConfig, type OAuthCallbackRequest, type ScrobblerConfigUpdate, type MetadataLinkAllResult } from '@/lib/api/types';
 import { SeriesMatchDialog } from '@/components/comp/scrobbler/series-match-dialog';
 import { RefreshCw, Link, Link2Off, ExternalLink, Key } from 'lucide-react';
 import { apiClient } from '@/lib/api/client';
+import { getProgressHub } from '@/lib/api/signalr/progressHub';
+import { JobType, ProgressStatus } from '@/lib/api/types';
 
 const providerIcons: Record<ScrobblerProvider, string> = {
   [ScrobblerProvider.MyAnimeList]: 'MAL',
@@ -21,7 +23,34 @@ const providerIcons: Record<ScrobblerProvider, string> = {
   [ScrobblerProvider.ComicVine]: 'CV',
   [ScrobblerProvider.Kitsu]: 'KT',
   [ScrobblerProvider.MangaDex]: 'MD',
+  [ScrobblerProvider.MangaBaka]: 'MB',
+  [ScrobblerProvider.Bangumi]: 'BG',
+  [ScrobblerProvider.MangaUpdates]: 'MU',
 };
+
+/**
+ * A public metadata-only provider needs no credentials: Features has Metadata set,
+ * Scrobbling unset, and no direct auth / OAuth flow. Drives the UI to show it as
+ * "Ready" (no Connect step) while still letting the user enable it.
+ * Falls back to provider id when the features flag is not (yet) present on the payload,
+ * so the UI can never regress into showing a Connect flow for these providers.
+ */
+function isPublicMetadataProvider(config: ScrobblerConfig): boolean {
+  const features = config.features ?? 0;
+  const hasMetadata = (features & ProviderFeatures.Metadata) === ProviderFeatures.Metadata;
+  const hasScrobbling = (features & ProviderFeatures.Scrobbling) === ProviderFeatures.Scrobbling;
+
+  // Explicit provider-id fallback: the three public metadata APIs (plus no-auth gate).
+  const isPublicMetadataId =
+    config.provider === ScrobblerProvider.MangaBaka ||
+    config.provider === ScrobblerProvider.Bangumi ||
+    config.provider === ScrobblerProvider.MangaUpdates;
+
+  // ComicVine is metadata-only but requires an API key → not "public".
+  const isComicVine = config.provider === ScrobblerProvider.ComicVine;
+
+  return isPublicMetadataId || (hasMetadata && !hasScrobbling && !config.supportsDirectAuth && !isComicVine);
+}
 
 export function ScrobblerSettings() {
   const queryClient = useQueryClient();
@@ -33,6 +62,33 @@ export function ScrobblerSettings() {
   const disconnect = useScrobblerDisconnect();
   const triggerSync = useTriggerSync();
   const autoMatchAll = useAutoMatchAll();
+  const [linkProgress, setLinkProgress] = useState<string | null>(null);
+
+  // Live metadata-link progress from ProgressHub (jobType = MetadataLink).
+  useEffect(() => {
+    let unsubscribe: (() => void) | null = null;
+    const listen = async () => {
+      try {
+        await getProgressHub().startConnection();
+        unsubscribe = getProgressHub().onProgress((p) => {
+          if (p.jobType !== JobType.MetadataLink) return;
+          if (p.progressStatus === ProgressStatus.Started || p.progressStatus === ProgressStatus.InProgress) {
+            setLinkProgress(p.message || `Linking… ${p.percentage ?? 0}%`);
+          } else if (p.progressStatus === ProgressStatus.Completed) {
+            setLinkProgress(p.message || 'Link complete');
+            void queryClient.invalidateQueries({ queryKey: ['scrobbler', 'configs'] });
+            void queryClient.invalidateQueries({ queryKey: ['scrobbler', 'matches'] });
+          } else if (p.progressStatus === ProgressStatus.Failed) {
+            setLinkProgress(p.errorMessage || 'Link failed');
+          }
+        });
+      } catch {
+        // SignalR unavailable — link runs anyway; header button still shows final summary.
+      }
+    };
+    void listen();
+    return () => { unsubscribe?.(); };
+  }, [queryClient]);
 
   const kitsuAuth = useKitsuDirectAuth();
   const mangaDexAuth = useMangaDexDirectAuth();
@@ -46,11 +102,26 @@ export function ScrobblerSettings() {
   const [mdClientId, setMdClientId] = useState('');
   const [mdClientSecret, setMdClientSecret] = useState('');
   const saveComicVineKey = useSaveComicVineApiKey();
+  const metadataLinkAll = useMetadataLinkAll();
+  const linkSeries = useCallback(() => {
+    // Fire-and-forget: run the link engine in the background (ProgressHub reports live progress).
+    setLinkProgress('Linking…');
+    void metadataLinkAll.mutateAsync().then((data) => {
+      setLinkProgress(
+        `Linked ${data?.linkedProviderEntries ?? 0} entries across ${data?.processedSeries ?? 0} series` +
+        (data?.suggestedEntries ? ` · ${data.suggestedEntries} suggestions` : ''));
+    }).catch(() => setLinkProgress('Link failed — check server logs'));
+  }, [metadataLinkAll]);
 
   const handleToggleEnabled = useCallback((config: ScrobblerConfig) => {
     const update: ScrobblerConfigUpdate = { isEnabled: !config.isEnabled };
     updateConfig.mutate({ provider: config.provider, update });
-  }, [updateConfig]);
+    // Public metadata providers have no Connect step — enabling them should immediately
+    // link series to the metadata services (no chapter/issue tracking supported).
+    if (!config.isEnabled && isPublicMetadataProvider(config)) {
+      metadataLinkAll.mutate();
+    }
+  }, [updateConfig, metadataLinkAll]);
 
   const handleToggleAutoSync = useCallback((config: ScrobblerConfig) => {
     const update: ScrobblerConfigUpdate = { autoSync: !config.autoSync };
@@ -60,9 +131,26 @@ export function ScrobblerSettings() {
   const handleConnect = useCallback(async (config: ScrobblerConfig) => {
     console.log('[Scrobbler] handleConnect called for provider:', config.provider);
     try {
+      // Public metadata providers (MangaBaka/Bangumi/MangaUpdates) never authorize via OAuth:
+      // enable the config + link series via the metadata link engine, skip the proxy entirely.
+      if (isPublicMetadataProvider(config)) {
+        await updateConfig.mutateAsync({ provider: config.provider, update: { isEnabled: true } });
+        await queryClient.invalidateQueries({ queryKey: ['scrobbler', 'configs'] });
+        linkSeries();
+        return;
+      }
+
       const providerName = ScrobblerProvider[config.provider];
       console.log('[Scrobbler] providerName resolved:', providerName);
       const result = await authorize.mutateAsync(providerName);
+
+      // Backend backstop: a provider that reports noAuthRequired needs no OAuth either.
+      if (result.noAuthRequired || !result.authUrl) {
+        await updateConfig.mutateAsync({ provider: config.provider, update: { isEnabled: true } });
+        await metadataLinkAll.mutateAsync();
+        await queryClient.invalidateQueries({ queryKey: ['scrobbler', 'configs'] });
+        return;
+      }
       console.log('[Scrobbler] authorize result:', result);
 
       // Open OAuth popup — opens on the proxy domain (HTTPS)
@@ -73,8 +161,8 @@ export function ScrobblerSettings() {
       // Start polling the backend callback immediately — the proxy will store
       // the tokens after the user completes the OAuth flow in the popup,
       // and the backend will retrieve them from the proxy.
-      // GET /api/scrobbler/callback/{provider}?state={state}
-      const callbackUrl = `/api/scrobbler/callback/${providerName}?state=${result.state}`;
+      // GET /api/externalprovider/callback/{provider}?state={state}
+      const callbackUrl = `/api/externalprovider/callback/${providerName}?state=${result.state}`;
       console.log('[Scrobbler] starting poll for:', callbackUrl);
 
       let connected = false;
@@ -109,9 +197,14 @@ export function ScrobblerSettings() {
   }, [authorize, autoMatchAll, triggerSync, queryClient]);
 
   const handleDisconnect = useCallback((config: ScrobblerConfig) => {
+    // Public metadata providers have no token to revoke — "Disconnect" disables the config.
+    if (isPublicMetadataProvider(config)) {
+      updateConfig.mutate({ provider: config.provider, update: { isEnabled: false } });
+      return;
+    }
     const providerName = ScrobblerProvider[config.provider];
     disconnect.mutate(providerName);
-  }, [disconnect]);
+  }, [disconnect, updateConfig]);
 
   const handleSaveComicVineKey = useCallback(async () => {
     if (!comicVineApiKey.trim()) return;
@@ -141,6 +234,15 @@ export function ScrobblerSettings() {
           <Button
             variant="outline"
             size="sm"
+            onClick={linkSeries}
+            disabled={metadataLinkAll.isPending}
+          >
+            <Link className={`h-4 w-4 mr-2 ${metadataLinkAll.isPending ? 'animate-pulse' : ''}`} />
+            {metadataLinkAll.isPending ? 'Linking…' : 'Link Series (Metadata)'}
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
             onClick={() => triggerSync.mutate()}
             disabled={triggerSync.isPending}
           >
@@ -149,6 +251,10 @@ export function ScrobblerSettings() {
           </Button>
         </div>
       </div>
+
+      {linkProgress && (
+        <p className="text-xs text-muted-foreground">{linkProgress}</p>
+      )}
 
       <Separator />
 
@@ -165,8 +271,10 @@ export function ScrobblerSettings() {
                   <div>
                     <CardTitle className="text-lg">{config.displayName}</CardTitle>
                     <CardDescription>
-                      {config.isConnected ? (
+                      {(config.isConnected || (isPublicMetadataProvider(config) && config.isEnabled)) ? (
                         <Badge variant="default" className="mt-1">Connected</Badge>
+                      ) : isPublicMetadataProvider(config) ? (
+                        <Badge variant="outline" className="mt-1">Ready · Public metadata</Badge>
                       ) : (
                         <Badge variant="secondary" className="mt-1">Disconnected</Badge>
                       )}
@@ -183,7 +291,7 @@ export function ScrobblerSettings() {
                     <Switch
                       checked={config.isEnabled}
                       onCheckedChange={() => handleToggleEnabled(config)}
-                      disabled={!config.isConnected}
+                      disabled={!config.isConnected && !isPublicMetadataProvider(config)}
                     />
                     <span className="text-sm">Enabled</span>
                   </div>
@@ -201,7 +309,7 @@ export function ScrobblerSettings() {
                 </div>
 
                 <div className="flex items-center gap-2">
-                  {config.isConnected ? (
+                  {(config.isConnected || (isPublicMetadataProvider(config) && config.isEnabled)) ? (
                     <>
                       {config.lastSyncAt && (
                         <span className="text-xs text-muted-foreground">
@@ -217,6 +325,10 @@ export function ScrobblerSettings() {
                         Disconnect
                       </Button>
                     </>
+                  ) : isPublicMetadataProvider(config) ? (
+                    <span className="text-xs text-muted-foreground">
+                      No credentials required
+                    </span>
                   ) : config.supportsDirectAuth ? (
                     config.provider === ScrobblerProvider.Kitsu ? (
                       <div className="flex items-center gap-2">
@@ -399,7 +511,13 @@ export function ScrobblerSettings() {
                           <Badge variant="default">Auto-matched ({Math.round((status.matchScore ?? 0) * 100)}%)</Badge>
                         )}
                         {status.mappingStatus === 3 && (
+                          <Badge variant="secondary">Temp. ignored</Badge>
+                        )}
+                        {status.mappingStatus === 4 && (
                           <Badge variant="secondary">Disabled</Badge>
+                        )}
+                        {status.mappingStatus === 5 && (
+                          <Badge variant="secondary">Blocked</Badge>
                         )}
                       </td>
                       <td className="py-2">

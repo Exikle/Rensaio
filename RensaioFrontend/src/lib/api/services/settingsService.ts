@@ -6,6 +6,14 @@ export interface SettingsUpdateResponse {
   setPasswordUrl?: string;
 }
 
+export interface VerifyContributorResponse {
+  verified: boolean;
+  error?: string;
+  banReason?: string;
+  isAdmin: boolean;
+  contributionVerified: boolean;
+}
+
 export const settingsService = {
   async getSettings(): Promise<Settings> {
     const data = await apiClient.get<Settings>('/api/settings');
@@ -24,5 +32,19 @@ export const settingsService = {
     };
 
     return apiClient.put<SettingsUpdateResponse>('/api/settings', settingsPayload);
+  },
+
+  /**
+   * Verifies a Contributor Id against the cloud contribution database
+   * (RensaioContributionDB.CF). The backend persists the verified flag on success.
+   */
+  async verifyContributor(
+    serverUrl: string,
+    contributorId: string,
+  ): Promise<VerifyContributorResponse> {
+    return apiClient.post<VerifyContributorResponse>('/api/settings/verify-contributor', {
+      serverUrl,
+      contributorId,
+    });
   },
 };

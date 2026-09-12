@@ -8,7 +8,7 @@ namespace RensaioBackend.Models.Dto;
 public class ScrobblerConfigDto
 {
     [JsonPropertyName("provider")]
-    public ScrobblerProvider Provider { get; set; }
+    public ExternalSeriesProvider Provider { get; set; }
 
     [JsonPropertyName("displayName")]
     public string DisplayName { get; set; } = string.Empty;
@@ -48,6 +48,12 @@ public class ScrobblerConfigDto
 
     [JsonPropertyName("imageTemplateUrl")]
     public string? ImageTemplateUrl { get; set; }
+
+    /// <summary>
+    /// Flag enum describing which features this provider supports (Scrobbling / Metadata).
+    /// </summary>
+    [JsonPropertyName("features")]
+    public ProviderFeatures Features { get; set; }
 }
 
 public class ScrobblerConfigUpdateDto
@@ -64,6 +70,10 @@ public class OAuthAuthorizeResponseDto
     [JsonPropertyName("authUrl")]
     public string AuthUrl { get; set; } = string.Empty;
 
+    /// <summary>True when the provider needs no authorization (public/API-key metadata).</summary>
+    [JsonPropertyName("noAuthRequired")]
+    public bool NoAuthRequired { get; set; } = false;
+
     [JsonPropertyName("state")]
     public string State { get; set; } = string.Empty;
 }
@@ -71,7 +81,7 @@ public class OAuthAuthorizeResponseDto
 public class OAuthCallbackRequestDto
 {
     [JsonPropertyName("provider")]
-    public ScrobblerProvider Provider { get; set; }
+    public ExternalSeriesProvider Provider { get; set; }
 
     [JsonPropertyName("code")]
     public string Code { get; set; } = string.Empty;
@@ -83,7 +93,7 @@ public class OAuthCallbackRequestDto
     public string? CodeVerifier { get; set; }
 }
 
-public class SeriesMatchStatusDto
+public class SeriesMatchStatusDto : IThumb
 {
     [JsonPropertyName("seriesId")]
     public Guid SeriesId { get; set; }
@@ -94,11 +104,19 @@ public class SeriesMatchStatusDto
     [JsonPropertyName("seriesCoverUrl")]
     public string? SeriesCoverUrl { get; set; }
 
+    /// <summary>Alias for the thumbnail-cache rewrite machine; never serialized (see seriesCoverUrl).</summary>
+    [JsonIgnore]
+    public string? ThumbnailUrl
+    {
+        get => SeriesCoverUrl;
+        set => SeriesCoverUrl = value;
+    }
+
     [JsonPropertyName("alternativeTitles")]
     public string AlternativeTitles { get; set; } = string.Empty;
 
     [JsonPropertyName("provider")]
-    public ScrobblerProvider Provider { get; set; }
+    public ExternalSeriesProvider Provider { get; set; }
 
     [JsonPropertyName("mappingStatus")]
     public SeriesMappingStatus MappingStatus { get; set; }
@@ -137,7 +155,7 @@ public class AutoMatchResultDto
 public class SeriesMatchSearchDto
 {
     [JsonPropertyName("provider")]
-    public ScrobblerProvider Provider { get; set; }
+    public ExternalSeriesProvider Provider { get; set; }
 
     [JsonPropertyName("query")]
     public string Query { get; set; } = string.Empty;
@@ -146,7 +164,7 @@ public class SeriesMatchSearchDto
 public class SeriesMatchSearchResultDto
 {
     [JsonPropertyName("provider")]
-    public ScrobblerProvider Provider { get; set; }
+    public ExternalSeriesProvider Provider { get; set; }
 
     [JsonPropertyName("results")]
     public List<ScrobblerSearchResult> Results { get; set; } = [];
@@ -158,7 +176,7 @@ public class ConfirmMatchRequestDto
     public Guid SeriesId { get; set; }
 
     [JsonPropertyName("provider")]
-    public ScrobblerProvider Provider { get; set; }
+    public ExternalSeriesProvider Provider { get; set; }
 
     [JsonPropertyName("externalSeriesId")]
     public string ExternalSeriesId { get; set; } = string.Empty;
@@ -173,13 +191,13 @@ public class DisableLinkRequestDto
     public Guid SeriesId { get; set; }
 
     [JsonPropertyName("provider")]
-    public ScrobblerProvider Provider { get; set; }
+    public ExternalSeriesProvider Provider { get; set; }
 }
 
 public class SyncStatusDto
 {
     [JsonPropertyName("provider")]
-    public ScrobblerProvider Provider { get; set; }
+    public ExternalSeriesProvider Provider { get; set; }
 
     [JsonPropertyName("lastSyncAt")]
     public DateTime? LastSyncAt { get; set; }
@@ -206,7 +224,7 @@ public class ComicVineApiKeyDto
     public string ApiKey { get; set; } = string.Empty;
 }
 
-public class ScrobblerSearchResult
+public class ScrobblerSearchResult : IThumb
 {
     [JsonPropertyName("externalId")]
     public string ExternalId { get; set; } = string.Empty;
@@ -219,6 +237,14 @@ public class ScrobblerSearchResult
 
     [JsonPropertyName("coverUrl")]
     public string? CoverUrl { get; set; }
+
+    /// <summary>Alias for the thumbnail-cache rewrite machine; never serialized (see coverUrl).</summary>
+    [JsonIgnore]
+    public string? ThumbnailUrl
+    {
+        get => CoverUrl;
+        set => CoverUrl = value;
+    }
 
     [JsonPropertyName("type")]
     public string? Type { get; set; }
@@ -237,6 +263,13 @@ public class ScrobblerSearchResult
 
     [JsonPropertyName("year")]
     public string? Year { get; set; }
+
+    /// <summary>
+    /// Canonical "site:id" pairs of the same series on other sites (e.g. "anilist:30002").
+    /// Populated by providers that expose cross-site links in their search payload.
+    /// </summary>
+    [JsonPropertyName("linkedSitesIds")]
+    public List<string> LinkedSitesIds { get; set; } = [];
 }
 
 public class KitsuDirectAuthDto

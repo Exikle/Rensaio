@@ -67,6 +67,8 @@ adminRoutes.post('/export', async (c) => {
       files: result.files,
       scrubbed: result.scrubbed,
       orphanTitlesArchived: result.orphanTitlesArchived,
+      version: result.version,
+      compression: result.compression,
     });
   } catch (err) {
     console.error('Manual export failed:', err);

@@ -1,39 +1,19 @@
-using RensaioBackend.Models.Enums;
-using System.ComponentModel.DataAnnotations;
-using System.ComponentModel.DataAnnotations.Schema;
-
 namespace RensaioBackend.Models.Database;
 
 /// <summary>
-/// Stores the mapping between a local series and its ID on an external scrobbling service.
+/// Shared mapping/decision state. Mappings are global-only (the per-user
+/// <c>UserSeriesMappings</c> table has been dropped in favor of the global
+/// <see cref="SeriesMappingEntity"/>); old integer values are kept stable so persisted data is
+/// never renumbered. <see cref="Blocked"/> means the specific (series/provider) pair must never be
+/// auto-linked; <see cref="TemporaryIgnored"/> is re-evaluated after one month (derived from
+/// LinkedDate); <see cref="ForeverIgnored"/> is never auto-linked again.
 /// </summary>
-public class UserSeriesMappingEntity
-{
-    [Key]
-    public Guid Id { get; set; }
-
-    [Required]
-    public Guid UserId { get; set; }
-
-    [Required]
-    public Guid SeriesId { get; set; }
-
-    [Required]
-    public ScrobblerProvider Provider { get; set; }
-
-    public string ExternalSeriesId { get; set; } = string.Empty;
-    public string? ExternalSeriesTitle { get; set; }
-
-    public SeriesMappingStatus MappingStatus { get; set; } = SeriesMappingStatus.Unmatched;
-
-    [ForeignKey(nameof(UserId))]
-    public UserEntity? User { get; set; }
-}
-
 public enum SeriesMappingStatus
 {
     Unmatched = 0,
     AutoMatched = 1,
     UserConfirmed = 2,
-    Ignored = 3
+    TemporaryIgnored = 3,
+    ForeverIgnored = 4,
+    Blocked = 5
 }

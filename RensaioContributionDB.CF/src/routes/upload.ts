@@ -39,11 +39,11 @@ uploadRoutes.post('/', async (c) => {
     return c.json<ErrorResponse>({ error: 'Invalid JSON body' }, 400);
   }
 
-  if (!body || !Array.isArray(body.items)) {
-    return c.json<ErrorResponse>({ error: 'Request body must contain an "items" array' }, 400);
-  }
-
-  const result = await processUpload(c.env.DB, contributorId, body.items);
+  const result = await processUpload(
+    c.env.DB,
+    contributorId,
+    body
+  );
   return c.json(result);
 });
 

@@ -4,6 +4,7 @@ import { useState } from "react";
 import {
   Check,
   Copy,
+  Database,
   Download,
   Edit,
   LogOut,
@@ -211,14 +212,41 @@ export function UserAvatarDropdown({ size = "md" }: { size?: "sm" | "md" }) {
             Edit...
           </DropdownMenuItem>
 
-          {/* Trackers */}
+          {/* External Services */}
           <DropdownMenuItem
             onClick={() => setIsTrackerOpen(true)}
             className="flex items-center gap-2 cursor-pointer"
           >
             <Radio className="h-4 w-4" />
-            Trackers...
+            External Services...
           </DropdownMenuItem>
+
+          {/* Mappings — Manager+ (Managers, Admins, Owner). */}
+          {canManage && (
+            <DropdownMenuItem asChild>
+              <Link
+                href="/external-mappings"
+                className="flex items-center gap-2 cursor-pointer"
+              >
+                <Database className="h-4 w-4" />
+                Mappings
+              </Link>
+            </DropdownMenuItem>
+          )}
+
+          {/* Contribution — Owner only, contribution enabled, AND the Contributor Id
+              must be verified against the contribution database. */}
+          {canOwner && settings?.contributionEnabled && settings?.contributionVerified && (
+            <DropdownMenuItem asChild>
+              <Link
+                href="/contribution"
+                className="flex items-center gap-2 cursor-pointer"
+              >
+                <Database className="h-4 w-4" />
+                Contribution
+              </Link>
+            </DropdownMenuItem>
+          )}
 
           <DropdownMenuSeparator />
 

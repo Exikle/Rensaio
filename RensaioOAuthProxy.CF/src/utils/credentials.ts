@@ -1,4 +1,12 @@
 import type { Env } from '../types';
+import { IMPLICIT_CAPABLE_PROVIDERS } from '../types';
+
+/**
+ * Determines whether a provider runs the Implicit Grant flow (no client_secret).
+ */
+export function isImplicitProvider(provider: string): boolean {
+  return IMPLICIT_CAPABLE_PROVIDERS.has(provider.toLowerCase());
+}
 
 /**
  * Maps 1:1 to GetCredentials() in ProviderApiService.cs.
@@ -22,6 +30,18 @@ export function getCredentials(provider: string, env: Env): { clientId: string; 
 
   const clientId = (env[clientIdKey] as string | undefined) ?? '';
   const clientSecret = (env[clientSecretKey] as string | undefined) ?? '';
+
+  // Implicit-flow providers (e.g. AniList) are public clients — only client_id
+  // is required. The client_secret is never used for the implicit grant.
+  if (isImplicitProvider(provider)) {
+    if (!clientId) {
+      throw new Error(
+        `No client_id configured for provider: ${normalized}. ` +
+        `Set ${clientIdKey} environment variable / var.`
+      );
+    }
+    return { clientId, clientSecret: '' };
+  }
 
   if (!clientId || !clientSecret) {
     throw new Error(

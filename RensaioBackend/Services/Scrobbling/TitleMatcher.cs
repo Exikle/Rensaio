@@ -24,9 +24,15 @@ public class TitleMatcher
         // 1. Primary title
         candidates.Add(series.Title);
 
-        // 2. Storage folder name (often contains the "real" name)
+        // 2. Storage folder name (often contains the "real" name). Folder names use underscores
+        // where spaces belong (e.g. "The_Return_of_the_Crazy_Demon") — normalize to spaces so the
+        // query actually matches the providers' search engines.
         if (!string.IsNullOrWhiteSpace(series.StoragePath))
-            candidates.Add(Path.GetFileName(series.StoragePath.TrimEnd('/', '\\')));
+        {
+            var folderName = Path.GetFileName(series.StoragePath.TrimEnd('/', '\\')) ?? string.Empty;
+            var spaced = folderName.Replace('_', ' ');
+            if (!string.IsNullOrWhiteSpace(spaced)) candidates.Add(spaced);
+        }
 
         // 3. Provider titles (each SeriesProvider may have its own title)
         foreach (var source in series.Sources)
@@ -242,7 +248,26 @@ public class TitleMatcher
         // Collapse spaces.
         value = Regex.Replace(value, @"\s+", " ").Trim();
 
+        // Collapse stopwords anywhere in the title (not just leading). "The/Of/And/A/An/To/In/..."
+        // carry no identity: "Kingdom of Heroes" and "Kingdom Heroes" are the same work, and the
+        // normalized form must be equal so the exact-match / core fast-paths score them 100/98.
+        value = RemoveStopwords(value);
+
         return value;
+    }
+
+    /// <summary>Removes insignificant stopwords across the whole title, preserving word order.</summary>
+    private static string RemoveStopwords(string value)
+    {
+        var stopWords = new HashSet<string>
+        {
+            "the", "a", "an", "and", "or", "of", "to", "in", "on", "for",
+            "no", "de", "la", "el"
+        };
+
+        return string.Join(' ',
+            value.Split(' ', StringSplitOptions.RemoveEmptyEntries)
+                 .Where(t => !stopWords.Contains(t)));
     }
 
     private static string RemoveWeakMediaWords(string value)

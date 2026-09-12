@@ -48,7 +48,9 @@ export function SeriesMappingRequester({ open, onOpenChange, provider }: SeriesM
       });
 
     const disabled = filtered.filter(m =>
-      m.mappingStatus === SeriesMappingStatus.Ignored
+      m.mappingStatus === SeriesMappingStatus.ForeverIgnored ||
+      m.mappingStatus === SeriesMappingStatus.TemporaryIgnored ||
+      m.mappingStatus === SeriesMappingStatus.Blocked
     );
 
     return { needsAttention, otherItems, disabled };
@@ -71,8 +73,12 @@ export function SeriesMappingRequester({ open, onOpenChange, provider }: SeriesM
         return <Badge variant="default">Auto{pct != null ? ` (${pct}%)` : ''}</Badge>;
       case SeriesMappingStatus.UserConfirmed:
         return <Badge variant="default">User</Badge>;
-      case SeriesMappingStatus.Ignored:
+      case SeriesMappingStatus.TemporaryIgnored:
+        return <Badge variant="secondary">Temp. ignored</Badge>;
+      case SeriesMappingStatus.ForeverIgnored:
         return <Badge variant="secondary">Disabled</Badge>;
+      case SeriesMappingStatus.Blocked:
+        return <Badge variant="secondary">Blocked</Badge>;
     }
   };
 

@@ -7,6 +7,7 @@ import {
   ArrowDownAZ,
   MoreVertical,
   Upload,
+  CloudUpload,
 } from "lucide-react";
 import {
   DropdownMenu,
@@ -37,6 +38,10 @@ interface SourcesToolbarProps {
   setSort: (v: SortOption) => void;
   onInstallFromApk: () => void;
   nsfwVisibility: NsfwVisibility;
+  /** Export the local contribution database to the cloud contribution worker. */
+  onExportToCloud?: () => void;
+  /** Whether the contribution export is in flight. */
+  exportingToCloud?: boolean;
 }
 
 export function SourcesToolbar({
@@ -49,6 +54,8 @@ export function SourcesToolbar({
   setSort,
   onInstallFromApk,
   nsfwVisibility,
+  onExportToCloud,
+  exportingToCloud,
 }: SourcesToolbarProps) {
   const [langSheetOpen, setLangSheetOpen] = useState(false);
 
@@ -189,6 +196,16 @@ export function SourcesToolbar({
               <Upload className="h-4 w-4" />
               Install from APK…
             </DropdownMenuItem>
+            {onExportToCloud && (
+              <DropdownMenuItem
+                onSelect={onExportToCloud}
+                disabled={exportingToCloud}
+                className="gap-2"
+              >
+                <CloudUpload className="h-4 w-4" />
+                {exportingToCloud ? 'Exporting…' : 'Export contributions to cloud'}
+              </DropdownMenuItem>
+            )}
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
@@ -258,6 +275,16 @@ export function SourcesToolbar({
               <Upload className="h-4 w-4" />
               Install from APK…
             </DropdownMenuItem>
+            {onExportToCloud && (
+              <DropdownMenuItem
+                onSelect={onExportToCloud}
+                disabled={exportingToCloud}
+                className="gap-2"
+              >
+                <CloudUpload className="h-4 w-4" />
+                {exportingToCloud ? 'Exporting…' : 'Export contributions to cloud'}
+              </DropdownMenuItem>
+            )}
           </DropdownMenuContent>
         </DropdownMenu>
       </div>

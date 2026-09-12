@@ -76,8 +76,12 @@ export function SeriesMatchDialog({ seriesId, provider, open, onOpenChange }: Se
         return <Badge variant="default">Auto-matched ({Math.round((score ?? 0) * 100)}%)</Badge>;
       case SeriesMappingStatus.UserConfirmed:
         return <Badge variant="default">Matched</Badge>;
-      case SeriesMappingStatus.Ignored:
+      case SeriesMappingStatus.TemporaryIgnored:
+        return <Badge variant="secondary">Temp. ignored</Badge>;
+      case SeriesMappingStatus.ForeverIgnored:
         return <Badge variant="secondary">Disabled</Badge>;
+      case SeriesMappingStatus.Blocked:
+        return <Badge variant="secondary">Blocked</Badge>;
     }
   };
 
@@ -108,7 +112,9 @@ export function SeriesMatchDialog({ seriesId, provider, open, onOpenChange }: Se
                 <RefreshCw className={`h-4 w-4 mr-1 ${autoMatchSeries.isPending ? 'animate-spin' : ''}`} />
                 Auto-Match
               </Button>
-              {currentMatch.mappingStatus !== SeriesMappingStatus.Ignored && (
+              {currentMatch.mappingStatus !== SeriesMappingStatus.ForeverIgnored &&
+                currentMatch.mappingStatus !== SeriesMappingStatus.TemporaryIgnored &&
+                currentMatch.mappingStatus !== SeriesMappingStatus.Blocked && (
                 <Button variant="outline" size="sm" onClick={handleDisable}>
                   <Ban className="h-4 w-4 mr-1" />
                   Disable Link

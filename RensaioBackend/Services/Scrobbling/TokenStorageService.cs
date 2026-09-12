@@ -28,7 +28,7 @@ public class TokenStorageService : ITokenStorageService
         _logger = logger;
     }
 
-    public async Task StoreTokenResultAsync(Guid userId, ScrobblerProvider providerType,
+    public async Task StoreTokenResultAsync(Guid userId, ExternalSeriesProvider providerType,
         ScrobblerTokenResult tokenResult, CancellationToken token = default)
     {
         var encryptedAccess = _protector.Encrypt(tokenResult.AccessToken!);
@@ -64,7 +64,7 @@ public class TokenStorageService : ITokenStorageService
         await _db.SaveChangesAsync(token);
     }
 
-    public async Task<string?> GetRefreshTokenAsync(Guid userId, ScrobblerProvider providerType,
+    public async Task<string?> GetRefreshTokenAsync(Guid userId, ExternalSeriesProvider providerType,
         CancellationToken token = default)
     {
         var config = await _db.UserScrobblerConfigs
@@ -84,7 +84,7 @@ public class TokenStorageService : ITokenStorageService
     }
 
     public async Task<(string? accessToken, string? refreshToken, DateTime? expiresAt)> LoadTokensAsync(
-        Guid userId, ScrobblerProvider providerType, CancellationToken token = default)
+        Guid userId, ExternalSeriesProvider providerType, CancellationToken token = default)
     {
         var config = await _db.UserScrobblerConfigs
             .FirstOrDefaultAsync(c => c.UserId == userId && c.Provider == providerType, token);
@@ -117,7 +117,7 @@ public class TokenStorageService : ITokenStorageService
         return (accessToken, refreshToken, config.TokenExpiresAt);
     }
 
-    public async Task PersistRefreshedTokensAsync(Guid userId, ScrobblerProvider providerType,
+    public async Task PersistRefreshedTokensAsync(Guid userId, ExternalSeriesProvider providerType,
         string encryptedAccessToken, string? encryptedRefreshToken, DateTime? expiresAt,
         CancellationToken token = default)
     {

@@ -4,6 +4,7 @@ using RensaioBackend.Models;
 using RensaioBackend.Services;
 using RensaioBackend.Services.Auth;
 using RensaioBackend.Services.Background;
+using RensaioBackend.Services.Contributions;
 using RensaioBackend.Utils;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.ResponseCompression;
@@ -132,6 +133,24 @@ namespace RensaioBackend
 
             // Register AppDbContext with SQLite provider, using the connection string from configuration (now points to runtime/rensaio.db)
             services.AddDbContext<AppDbContext>(options => options.UseSqlite(Configuration.GetConnectionString("DefaultConnection")));
+
+            // Register ContributionDbContext with SQLite provider, using the derived
+            // contributor.db path (sibling of rensaio.db under the runtime directory).
+            services.AddDbContext<ContributionDbContext>(options =>
+                options.UseSqlite(EnvironmentSetup.ContributorConnectionString(Configuration)));
+
+            // Contribution cloud export (POST /api/contributions/upload) and
+            // cloud snapshot import (POST /api/contributions/download).
+            services.AddHttpClient("ContributionUpload");
+            services.TryAddSingleton<IContributionUploadQueue, ContributionUploadQueue>();
+            services.AddScoped<ContributionUploadService>();
+            services.AddScoped<ContributionDownloadService>();
+            services.AddHostedService<ContributionUploadBackgroundService>();
+
+            // Contributor verification against the cloud contribution DB (RensaioContributionDB.CF).
+            services.AddHttpClient("ContributionVerification");
+            services.TryAddScoped<ContributionVerificationService>();
+
             services.AddHostedService<StartupHostedService>();
         }
 

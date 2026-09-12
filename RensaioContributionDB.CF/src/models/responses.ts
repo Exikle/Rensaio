@@ -15,16 +15,11 @@ export interface ContributorResponse {
 }
 
 /**
- * Response for POST /contributor.
- */
-export interface CreateContributorResponse {
-  contributor_id: string;
-}
-
-/**
- * A single item-level error from a batch upload.
+ * A single entity-level error from an upload batch.
+ * `list` is the entity list key ('t'|'m'|'s'|'i'|'d'), `index` is the row index.
  */
 export interface UploadError {
+  list: string;
   index: number;
   message: string;
 }
@@ -34,7 +29,6 @@ export interface UploadError {
  */
 export interface UploadResponse {
   processed: number;
-  skipped: number;
   errors: UploadError[];
 }
 
@@ -43,6 +37,7 @@ export interface UploadResponse {
  */
 export interface BanScrubSummary {
   sources: number;
+  series: number;
   metadata: number;
 }
 
@@ -62,9 +57,18 @@ export interface BanResponse {
 export interface ExportResponse {
   exported: boolean;
   files: string[];
+  version: number;
+  compression: number;  // 0 = zstd, 1 = brotli
   scrubbed: {
     sources: number;
     metadata: number;
     titles: number;
   };
+}
+
+/**
+ * Response for GET /replication.
+ */
+export interface ReplicationResponse {
+  version: number;
 }

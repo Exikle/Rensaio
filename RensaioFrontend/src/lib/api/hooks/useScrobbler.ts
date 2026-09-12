@@ -203,3 +203,22 @@ export const useSaveComicVineApiKey = () => {
     },
   });
 };
+
+/**
+ * Runs the metadata link engine across ALL local series. Links each series to every
+ * metadata-capable provider (MangaBaka/Bangumi/MangaUpdates/AniList/Kitsu/MangaDex/MAL/ComicVine)
+ * via title matching + cross-site propagation. Invalidate series/matches caches on success.
+ */
+export const useMetadataLinkAll = (onProgress?: (processed: number) => void) => {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: () => scrobblerService.linkAll(onProgress),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['scrobbler', 'configs'] });
+      queryClient.invalidateQueries({ queryKey: ['scrobbler', 'matches'] });
+      queryClient.invalidateQueries({ queryKey: ['scrobbler', 'unmatched'] });
+      queryClient.invalidateQueries({ queryKey: ['series'] });
+    },
+  });
+};

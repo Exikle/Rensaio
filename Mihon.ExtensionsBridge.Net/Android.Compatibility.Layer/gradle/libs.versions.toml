@@ -108,7 +108,7 @@ twelvemonkeys-imageio-webp = { module = "com.twelvemonkeys.imageio:imageio-webp"
 imageio-webp = "com.github.usefulness:webp-imageio:0.4.1"
 
 # Webview
-jcefmaven = "me.friwi:jcefmaven:141.0.10"
+jcefmaven = "me.friwi:jcefmaven:146.0.10"
 #db
 h2 = "com.h2database:h2:1.4.200" 
 

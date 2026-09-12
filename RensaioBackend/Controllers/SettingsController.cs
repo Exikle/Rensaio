@@ -132,6 +132,53 @@ namespace RensaioBackend.Controllers
 
                 var response = new SettingsUpdateResponseDto();
 
+                // If contribution is enabled with a Contributor Id, re-verify it against
+                // the cloud contribution DB so the verified flag stays truthful. When
+                // contribution is disabled or the Id is blank, clear the verified flag.
+                if (settings.ContributionEnabled && !string.IsNullOrWhiteSpace(settings.ContributionContributorId))
+                {
+                    bool idChanged = !string.Equals(
+                        currentSettings.ContributionContributorId?.Trim(),
+                        settings.ContributionContributorId?.Trim(),
+                        StringComparison.OrdinalIgnoreCase);
+                    bool serverChanged = !string.Equals(
+                        currentSettings.ContributionServerUrl?.Trim().TrimEnd('/'),
+                        settings.ContributionServerUrl?.Trim().TrimEnd('/'),
+                        StringComparison.OrdinalIgnoreCase);
+                    bool wasVerified = currentSettings.ContributionVerified;
+
+                    // Re-verify when the contributor Id or server URL changed, or when
+                    // the stored flag is stale (e.g. the contributor was banned upstream).
+                    if (idChanged || serverChanged || !wasVerified)
+                    {
+                        var verification = await _settingsService.VerifyContributorAsync(
+                            settings.ContributionServerUrl,
+                            settings.ContributionContributorId,
+                            token).ConfigureAwait(false);
+
+                        // Persist flag + id + server URL together so a settings refetch
+                        // right after verification keeps the typed Contributor Id.
+                        await _settingsService.SetContributionVerifiedAsync(
+                            verification.Verified,
+                            token,
+                            settings.ContributionContributorId,
+                            settings.ContributionServerUrl).ConfigureAwait(false);
+
+                        if (!verification.Verified)
+                        {
+                            response.Message = verification.Error ?? "Contributor Id could not be verified.";
+                        }
+                    }
+                }
+                else
+                {
+                    // Contribution is off, or no Contributor Id — nothing can be verified.
+                    if (currentSettings.ContributionVerified)
+                    {
+                        await _settingsService.SetContributionVerifiedAsync(false, token).ConfigureAwait(false);
+                    }
+                }
+
                 // If auth is being enabled now (was disabled before), check if current user needs a password
                 if (!authWasEnabled && authNowEnabled)
                 {
@@ -158,6 +205,101 @@ namespace RensaioBackend.Controllers
             {
                 _logger.LogError(ex, "Error updating settings");
                 return StatusCode(StatusCodes.Status500InternalServerError, new { error = "An error occurred while updating settings" });
+            }
+        }
+
+        /// <summary>
+        /// Response DTO for the contributor verification endpoint.
+        /// </summary>
+        public class VerifyContributorResponseDto
+        {
+            [JsonPropertyName("verified")]
+            public bool Verified { get; set; }
+
+            [JsonPropertyName("error")]
+            public string? Error { get; set; }
+
+            [JsonPropertyName("banReason")]
+            public string? BanReason { get; set; }
+
+            [JsonPropertyName("isAdmin")]
+            public bool IsAdmin { get; set; }
+
+            [JsonPropertyName("contributionVerified")]
+            public bool ContributionVerified { get; set; }
+        }
+
+        /// <summary>
+        /// Request DTO for the contributor verification endpoint.
+        /// </summary>
+        public class VerifyContributorRequestDto
+        {
+            [JsonPropertyName("serverUrl")]
+            public string ServerUrl { get; set; } = string.Empty;
+
+            [JsonPropertyName("contributorId")]
+            public string ContributorId { get; set; } = string.Empty;
+        }
+
+        /// <summary>
+        /// Verifies a Contributor Id against the cloud contribution database
+        /// (RensaioContributionDB.CF). On success, persists the verified flag so
+        /// all contribution features are unlocked. On failure, clears it.
+        /// </summary>
+        /// <response code="200">Verification processed — check <c>verified</c> in the body.</response>
+        /// <response code="400">Missing server URL or contributor Id.</response>
+        [HttpPost("verify-contributor")]
+        [RequireUserLevel(UserLevel.Owner)]
+        [ProducesResponseType(typeof(VerifyContributorResponseDto), StatusCodes.Status200OK)]
+        [ProducesResponseType(typeof(object), StatusCodes.Status400BadRequest)]
+        [ProducesResponseType(typeof(object), StatusCodes.Status500InternalServerError)]
+        public async Task<ActionResult<VerifyContributorResponseDto>> VerifyContributorAsync(
+            [FromBody][Required] VerifyContributorRequestDto request,
+            CancellationToken token = default)
+        {
+            if (!ModelState.IsValid)
+            {
+                return BadRequest(new { errors = ModelState });
+            }
+
+            if (string.IsNullOrWhiteSpace(request.ServerUrl))
+            {
+                return BadRequest(new { error = "Contribution server URL is required." });
+            }
+
+            if (string.IsNullOrWhiteSpace(request.ContributorId))
+            {
+                return BadRequest(new { error = "Contributor Id is required." });
+            }
+
+            try
+            {
+                var result = await _settingsService.VerifyContributorAsync(
+                    request.ServerUrl,
+                    request.ContributorId,
+                    token).ConfigureAwait(false);
+
+                // Persist flag + id + server URL atomically so the Contributor Id
+                // stays in the textbox after the frontend refetches settings.
+                await _settingsService.SetContributionVerifiedAsync(
+                    result.Verified,
+                    token,
+                    request.ContributorId,
+                    request.ServerUrl).ConfigureAwait(false);
+
+                return Ok(new VerifyContributorResponseDto
+                {
+                    Verified = result.Verified,
+                    Error = result.Error,
+                    BanReason = result.BanReason,
+                    IsAdmin = result.IsAdmin,
+                    ContributionVerified = result.Verified,
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error verifying contributor");
+                return StatusCode(StatusCodes.Status500InternalServerError, new { error = "An error occurred while verifying the contributor" });
             }
         }
     }

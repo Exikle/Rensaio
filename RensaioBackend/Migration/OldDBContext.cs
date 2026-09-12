@@ -1,9 +1,9 @@
-using RensaioBackend.Data;
 using RensaioBackend.Migration.Models;
 using RensaioBackend.Models.Enums;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.ChangeTracking;
 using System.Text.Json;
+using RensaioBackend.Data.Converters;
 
 namespace RensaioBackend.Migration
 {

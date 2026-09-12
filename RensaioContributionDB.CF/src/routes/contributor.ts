@@ -1,12 +1,14 @@
 import { Hono } from 'hono';
 import type { Env } from '../types';
-import { getContributor, createContributor } from '../services/contributor-service';
-import type { ContributorResponse, CreateContributorResponse, ErrorResponse } from '../models/responses';
-import type { CreateContributorRequest } from '../models/requests';
+import { getContributor } from '../services/contributor-service';
+import type { ContributorResponse, ErrorResponse } from '../models/responses';
 
 /**
- * Contributor routes.
+ * Contributor routes — read-only validation.
  * Base path: /contributor (set in index.ts)
+ *
+ * NOTE: Contributor auto-creation is no longer supported. Contributors are
+ * provisioned out-of-band (D1 seed). POST /contributor therefore returns 410.
  */
 const contributorRoutes = new Hono<{ Bindings: Env }>();
 
@@ -33,33 +35,12 @@ contributorRoutes.get('/', async (c) => {
   return c.json(response);
 });
 
-// POST /contributor?admin={adminUUID}
-// Create a new contributor. When the contributors table is empty, the admin
-// UUID may be omitted and the first contributor becomes an admin (bootstrap).
-contributorRoutes.post('/', async (c) => {
-  const adminId = c.req.query('admin') ?? undefined;
-
-  let body: CreateContributorRequest;
-  try {
-    body = await c.req.json<CreateContributorRequest>();
-  } catch {
-    return c.json<ErrorResponse>({ error: 'Invalid JSON body' }, 400);
-  }
-
-  if (body === null || typeof body !== 'object') {
-    return c.json<ErrorResponse>({ error: 'Invalid JSON body' }, 400);
-  }
-
-  const isAdmin = body.is_admin === true;
-
-  const result = await createContributor(c.env.DB, adminId, isAdmin);
-
-  if (!result.ok) {
-    return c.json<ErrorResponse>({ error: result.error }, result.status);
-  }
-
-  const response: CreateContributorResponse = { contributor_id: result.contributor_id };
-  return c.json(response, 201);
+// POST /contributor — removed (auto-create no longer supported)
+contributorRoutes.post('/', (_c) => {
+  return _c.json<ErrorResponse>(
+    { error: 'Contributor auto-creation is no longer supported' },
+    410
+  );
 });
 
 export default contributorRoutes;

@@ -91,6 +91,28 @@ namespace RensaioBackend.Utils
             node[key] = absolutePath;
             return true;
         }
+
+        /// <summary>
+        /// Derives the connection string for the local contributor database
+        /// (<c>contributor.db</c>) as a sibling of <c>rensaio.db</c> (the
+        /// <c>DefaultConnection</c> target). No separate configuration key is required.
+        /// </summary>
+        public static string ContributorDatabasePath(IConfiguration configuration)
+        {
+            string defaultCs = configuration.GetConnectionString("DefaultConnection") ?? string.Empty;
+            if (!defaultCs.StartsWith("Data Source=", StringComparison.OrdinalIgnoreCase))
+                return System.IO.Path.Combine(Path, "contributor.db");
+            string dbPath = defaultCs.Substring("Data Source=".Length).Trim();
+            string dir = System.IO.Path.GetDirectoryName(dbPath) ?? string.Empty;
+            if (string.IsNullOrEmpty(dir))
+                dir = Path;
+            return System.IO.Path.Combine(dir, "contributor.db");
+        }
+
+        public static string ContributorConnectionString(IConfiguration configuration)
+        {
+            return "Data Source=" + ContributorDatabasePath(configuration);
+        }
         public static async Task WriteToAppSettingsAsync(string? storageDirectory, CancellationToken token = default)
         {
           

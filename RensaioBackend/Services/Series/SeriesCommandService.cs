@@ -10,10 +10,12 @@ using RensaioBackend.Services.Helpers;
 using RensaioBackend.Services.Images;
 using RensaioBackend.Services.Jobs;
 using RensaioBackend.Services.Jobs.Models;
+using RensaioBackend.Services.Metadata;
 using RensaioBackend.Services.Opds;
 using RensaioBackend.Services.Settings;
 using Microsoft.AspNetCore.Mvc.RazorPages;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using Mihon.ExtensionsBridge.Models.Abstractions;
 using Mihon.ExtensionsBridge.Models.Extensions;
 using System.Collections.Concurrent;
@@ -41,6 +43,8 @@ namespace RensaioBackend.Services.Series
         private readonly CadenceCalculationService _cadenceService;
         private readonly SeriesStateService _stateService;
         private readonly HashCacheService _hashCache;
+        private readonly MetadataLinkEngine _metadataLinkEngine;
+        private readonly IServiceScopeFactory _scopeFactory;
 
         public SeriesCommandService(AppDbContext db, SettingsService settings, ArchiveHelperService archiveHelper,
             SeriesProviderService providerService, ILogger<SeriesCommandService> logger,
@@ -48,7 +52,9 @@ namespace RensaioBackend.Services.Series
             JobManagementService jobManagement,
             CadenceCalculationService cadenceService,
             SeriesStateService stateService,
-            HashCacheService hashCache)
+            HashCacheService hashCache,
+            MetadataLinkEngine metadataLinkEngine,
+            IServiceScopeFactory scopeFactory)
         {
             _db = db;
             _settings = settings;
@@ -62,6 +68,8 @@ namespace RensaioBackend.Services.Series
             _cadenceService = cadenceService;
             _stateService = stateService;
             _hashCache = hashCache;
+            _metadataLinkEngine = metadataLinkEngine;
+            _scopeFactory = scopeFactory;
           }
 
         /// <summary>
@@ -134,6 +142,40 @@ namespace RensaioBackend.Services.Series
                 if (existingThumb != dbSeries.ThumbnailUrl)
                 {
                     await _archiveHelper.WriteComicThumbnailAsync(dbSeries, token).ConfigureAwait(false);
+                }
+
+                // Fire-and-forget on-add metadata automatch. The transaction is committed and the
+                // series row is guaranteed to exist, so the app-wide MetadataLinkEngine can safely
+                // link this new series across all metadata providers + the in-memory repository.
+                // Independent of the background scan; best-effort (failures never roll back the add).
+                //
+                // IMPORTANT: this runs in its OWN service scope with no request token. The engine
+                // and DbContext here are request-scoped and get disposed the moment the HTTP call
+                // returns — using them would cancel/abort the mapping before it completes. Creating
+                // a fresh scope (same pattern as MetadataBackgroundScanService.TriggerAsync) lets
+                // the mapping always run to completion after the series is created.
+                try
+                {
+                    var newSeriesId = dbSeries.Id;
+                    // Intentionally fire-and-forget: run in a detached scope so the mapping is not
+                    // tied to (and cannot be cancelled by) the request that created the series.
+                    _ = Task.Run(async () =>
+                    {
+                        try
+                        {
+                            using var scope = _scopeFactory.CreateScope();
+                            var engine = scope.ServiceProvider.GetRequiredService<MetadataLinkEngine>();
+                            await engine.LinkSeriesAsync(newSeriesId, CancellationToken.None).ConfigureAwait(false);
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogWarning(ex, "On-add metadata automatch failed for series {SeriesId}", newSeriesId);
+                        }
+                    });
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to schedule on-add metadata automatch for series {SeriesId}", dbSeries.Id);
                 }
 
                 return dbSeries.Id;
@@ -970,7 +1012,7 @@ namespace RensaioBackend.Services.Series
                 if (string.IsNullOrEmpty(mapping.Provider) || string.IsNullOrEmpty(mapping.ExternalId))
                     continue;
 
-                if (!Enum.TryParse<ScrobblerProvider>(mapping.Provider, out var provider))
+                if (!Enum.TryParse<ExternalSeriesProvider>(mapping.Provider, out var provider))
                 {
                     _logger.LogWarning("Unknown scrobbler provider '{Provider}' in ExternalMappings for series {title}",
                         mapping.Provider, title);

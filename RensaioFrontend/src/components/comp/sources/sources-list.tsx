@@ -7,7 +7,9 @@ import { type MultiSelectOption } from "@/components/ui/multi-select";
 import { Input } from "@/components/ui/input";
 import { providerService } from "@/lib/api/services/providerService";
 import { useSettings } from "@/lib/api/hooks/useSettings";
+import { useContributionUpload } from "@/lib/api/hooks/useContributionUpload";
 import { useToast } from "@/hooks/use-toast";
+import { useContributionEnabled } from "@/hooks/use-contribution-enabled";
 import { ProviderPreferencesRequester } from "@/components/comp/provider-preferences-requester";
 import {
   getExtensionLanguages,
@@ -85,6 +87,34 @@ export function SourcesList({
   // ── NSFW visibility from settings ────────────────────────────────────────────
   const { data: settings } = useSettings();
   const nsfwVisibility = settings?.nsfwVisibility ?? NsfwVisibility.HideByDefault;
+
+  // ── Contribution export to cloud ────────────────────────────────────────────
+  const contributionUpload = useContributionUpload();
+
+  // Only offered when contributions are enabled, the Contributor Id is configured,
+  // AND that Id has been verified against the contribution database.
+  const contributionAvailable = useContributionEnabled();
+
+  // Fire-and-forget: enqueue the upload and confirm immediately. The export
+  // runs in a background process server-side.
+  const handleExportToCloud = () => {
+    contributionUpload.mutate(undefined, {
+      onSuccess: () => {
+        toast({
+          title: 'Contribution export queued',
+          description: 'Your contributions are being uploaded to the cloud in the background.',
+        });
+      },
+      onError: (error) => {
+        console.error('Failed to queue contribution export:', error);
+        toast({
+          title: 'Contribution export failed',
+          description: error instanceof Error ? error.message : 'Unknown error',
+          variant: 'destructive',
+        });
+      },
+    });
+  };
 
   // Sync NSFW toggle from settings on mount
   useEffect(() => {
@@ -377,6 +407,8 @@ export function SourcesList({
         setSort={setSort}
         onInstallFromApk={handleApkButtonClick}
         nsfwVisibility={nsfwVisibility}
+        onExportToCloud={contributionAvailable ? handleExportToCloud : undefined}
+        exportingToCloud={contributionUpload.isPending}
       />
 
       {/* Available section */}

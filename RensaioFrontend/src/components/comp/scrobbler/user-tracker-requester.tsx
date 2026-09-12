@@ -6,12 +6,9 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
-import { Separator } from "@/components/ui/separator";
-import { LazyImage } from "@/components/ui/lazy-image";
-import { useScrobblerConfigs, useUpdateScrobblerConfig, useScrobblerAuthorize, useScrobblerDisconnect, useTriggerSync, useSyncStatus, useSaveComicVineApiKey, useKitsuDirectAuth, useMangaDexDirectAuth, useScrobblerUnmatched, useAutoMatchAll } from '@/lib/api/hooks/useScrobbler';
-import { ScrobblerProvider, type ScrobblerConfig } from '@/lib/api/types';
-import { SeriesMappingRequester } from '@/components/comp/scrobbler/series-mapping-requester';
-import { Link, Link2Off, Key, RefreshCw, Radio, ExternalLink } from 'lucide-react';
+import { useScrobblerConfigs, useScrobblerAuthorize, useScrobblerDisconnect, useSaveComicVineApiKey, useKitsuDirectAuth, useMangaDexDirectAuth } from '@/lib/api/hooks/useScrobbler';
+import { ScrobblerProvider, ProviderFeatures, type ScrobblerConfig } from '@/lib/api/types';
+import { Link, Link2Off, Key, Radio, ExternalLink } from 'lucide-react';
 import { apiClient } from '@/lib/api/client';
 
 interface UserTrackerRequesterProps {
@@ -19,22 +16,35 @@ interface UserTrackerRequesterProps {
   onOpenChange: (open: boolean) => void;
 }
 
+/**
+ * A provider shown in the Trackers dialog must require authentication.
+ * Public metadata-only providers (MangaBaka/Bangumi/MangaUpdates) have no
+ * login/connect step, so they are filtered out here. ComicVine is metadata-only
+ * but requires an API key, so it still requires authentication.
+ */
+function requiresAuthentication(config: ScrobblerConfig): boolean {
+  const features = config.features ?? 0;
+  const hasMetadata = (features & ProviderFeatures.Metadata) === ProviderFeatures.Metadata;
+  const hasScrobbling = (features & ProviderFeatures.Scrobbling) === ProviderFeatures.Scrobbling;
+  const isPublicMetadataId =
+    config.provider === ScrobblerProvider.MangaBaka ||
+    config.provider === ScrobblerProvider.Bangumi ||
+    config.provider === ScrobblerProvider.MangaUpdates;
+  const isComicVine = config.provider === ScrobblerProvider.ComicVine;
+  const isPublic = isPublicMetadataId || (hasMetadata && !hasScrobbling && !config.supportsDirectAuth && !isComicVine);
+  return !isPublic;
+}
+
 export function UserTrackerRequester({ open, onOpenChange }: UserTrackerRequesterProps) {
   const queryClient = useQueryClient();
   const { data: configs, isLoading: configsLoading, error: configsError } = useScrobblerConfigs(open);
-  const { data: syncStatuses } = useSyncStatus(open);
-  const { data: unmatched } = useScrobblerUnmatched(open);
-  const updateConfig = useUpdateScrobblerConfig();
   const authorize = useScrobblerAuthorize();
   const disconnect = useScrobblerDisconnect();
-  const triggerSync = useTriggerSync();
-  const autoMatchAll = useAutoMatchAll();
 
   const kitsuAuth = useKitsuDirectAuth();
   const mangaDexAuth = useMangaDexDirectAuth();
   const saveComicVineKey = useSaveComicVineApiKey();
 
-  const [selectedMappingsProvider, setSelectedMappingsProvider] = useState<ScrobblerProvider | null>(null);
   const [comicVineApiKey, setComicVineApiKey] = useState('');
   const [kitsuEmail, setKitsuEmail] = useState('');
   const [kitsuPassword, setKitsuPassword] = useState('');
@@ -44,28 +54,23 @@ export function UserTrackerRequester({ open, onOpenChange }: UserTrackerRequeste
   const [mdClientSecret, setMdClientSecret] = useState('');
   const [connecting, setConnecting] = useState<ScrobblerProvider | null>(null);
 
-  const getSyncStatusForProvider = useCallback((provider: ScrobblerProvider) => {
-    return syncStatuses?.find(s => s.provider === provider);
-  }, [syncStatuses]);
-
-  const getUnmatchedCountForProvider = useCallback((provider: ScrobblerProvider) => {
-    return unmatched?.filter(u => u.provider === provider && u.mappingStatus === 0).length ?? 0;
-  }, [unmatched]);
-
   const handleConnectOAuth = useCallback(async (config: ScrobblerConfig) => {
     const providerName = ScrobblerProvider[config.provider];
     setConnecting(config.provider);
     try {
       const result = await authorize.mutateAsync(providerName);
 
+      // Backend backstop: provider reports noAuthRequired — nothing to connect.
+      if (result.noAuthRequired || !result.authUrl) {
+        await queryClient.invalidateQueries({ queryKey: ['scrobbler', 'configs'] });
+        return;
+      }
+
       // Open OAuth popup — opens on the proxy domain (HTTPS)
       const popup = window.open(result.authUrl, 'oauth-popup', 'width=600,height=700');
 
-      // We already have the state from the authorize response.
-      // Start polling the backend callback immediately — the proxy will store
-      // the tokens after the user completes the OAuth flow in the popup,
-      // and the backend will retrieve them from the proxy.
-      const callbackUrl = `/api/scrobbler/callback/${providerName}?state=${result.state}`;
+      // Poll the backend callback until the proxy has stored the tokens.
+      const callbackUrl = `/api/externalprovider/callback/${providerName}?state=${result.state}`;
 
       let connected = false;
       let attempts = 0;
@@ -76,7 +81,7 @@ export function UserTrackerRequester({ open, onOpenChange }: UserTrackerRequeste
           await apiClient.get<{ connected: boolean }>(callbackUrl);
           connected = true;
         } catch {
-          // Tokens not yet stored in proxy — retry
+          // Tokens not yet stored in the proxy — retry
         }
       }
 
@@ -85,14 +90,11 @@ export function UserTrackerRequester({ open, onOpenChange }: UserTrackerRequeste
       if (connected) {
         // Invalidate configs so the UI shows the provider as connected
         await queryClient.invalidateQueries({ queryKey: ['scrobbler', 'configs'] });
-        // Auto-match and sync after connect
-        await autoMatchAll.mutateAsync(config.provider);
-        await triggerSync.mutateAsync();
       }
     } finally {
       setConnecting(null);
     }
-  }, [authorize, autoMatchAll, triggerSync, queryClient]);
+  }, [authorize, queryClient]);
 
   const handleDisconnect = useCallback((config: ScrobblerConfig) => {
     const providerName = ScrobblerProvider[config.provider];
@@ -104,14 +106,12 @@ export function UserTrackerRequester({ open, onOpenChange }: UserTrackerRequeste
     setConnecting(ScrobblerProvider.Kitsu);
     try {
       await kitsuAuth.mutateAsync({ email: kitsuEmail, password: kitsuPassword });
-      await autoMatchAll.mutateAsync(ScrobblerProvider.Kitsu);
-      await triggerSync.mutateAsync();
       setKitsuEmail('');
       setKitsuPassword('');
     } finally {
       setConnecting(null);
     }
-  }, [kitsuEmail, kitsuPassword, kitsuAuth, autoMatchAll, triggerSync]);
+  }, [kitsuEmail, kitsuPassword, kitsuAuth]);
 
   const handleMangaDexConnect = useCallback(async () => {
     if (!mdUsername.trim() || !mdPassword.trim() || !mdClientId.trim() || !mdClientSecret.trim()) return;
@@ -123,8 +123,6 @@ export function UserTrackerRequester({ open, onOpenChange }: UserTrackerRequeste
         clientId: mdClientId,
         clientSecret: mdClientSecret,
       });
-      await autoMatchAll.mutateAsync(ScrobblerProvider.MangaDex);
-      await triggerSync.mutateAsync();
       setMdUsername('');
       setMdPassword('');
       setMdClientId('');
@@ -132,20 +130,21 @@ export function UserTrackerRequester({ open, onOpenChange }: UserTrackerRequeste
     } finally {
       setConnecting(null);
     }
-  }, [mdUsername, mdPassword, mdClientId, mdClientSecret, mangaDexAuth, autoMatchAll, triggerSync]);
+  }, [mdUsername, mdPassword, mdClientId, mdClientSecret, mangaDexAuth]);
 
   const handleSaveComicVine = useCallback(async () => {
     if (!comicVineApiKey.trim()) return;
     setConnecting(ScrobblerProvider.ComicVine);
     try {
       await saveComicVineKey.mutateAsync(comicVineApiKey);
-      await autoMatchAll.mutateAsync(ScrobblerProvider.ComicVine);
-      await triggerSync.mutateAsync();
       setComicVineApiKey('');
     } finally {
       setConnecting(null);
     }
-  }, [comicVineApiKey, saveComicVineKey, autoMatchAll, triggerSync]);
+  }, [comicVineApiKey, saveComicVineKey]);
+
+  // Only show providers that require authentication (no public metadata-only providers).
+  const authConfigs = (configs ?? []).filter(requiresAuthentication);
 
   return (
     <>
@@ -154,10 +153,10 @@ export function UserTrackerRequester({ open, onOpenChange }: UserTrackerRequeste
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Radio className="h-5 w-5" />
-              Trackers
+              External Services
             </DialogTitle>
             <DialogDescription>
-              Connect and manage your reading progress to external tracking services
+              Log in and manage your authentication with external services
             </DialogDescription>
           </DialogHeader>
 
@@ -167,15 +166,13 @@ export function UserTrackerRequester({ open, onOpenChange }: UserTrackerRequeste
             <div className="p-4 text-destructive text-center text-sm">
               Failed to load trackers: {configsError.message}
             </div>
-          ) : !configs || configs.length === 0 ? (
+          ) : authConfigs.length === 0 ? (
             <div className="p-4 text-muted-foreground text-center">
-              No tracking providers available. Check the server configuration.
+              No tracking providers that require authentication are available.
             </div>
           ) : (
             <div className="space-y-3">
-              {configs.map((config) => {
-                const syncStatus = getSyncStatusForProvider(config.provider);
-                const unmatchedCount = getUnmatchedCountForProvider(config.provider);
+              {authConfigs.map((config) => {
                 const isConnecting = connecting === config.provider;
 
                 return (
@@ -229,58 +226,19 @@ export function UserTrackerRequester({ open, onOpenChange }: UserTrackerRequeste
                           </Button>
                         )}
                         {config.isConnected && (
-                          <>
-                            {/* Mappings button */}
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              onClick={() => setSelectedMappingsProvider(config.provider)}
-                            >
-                              Mappings
-                            </Button>
-                            {/* Disconnect button */}
-                            <Button
-                              variant="destructive"
-                              size="sm"
-                              onClick={() => handleDisconnect(config)}
-                              disabled={disconnect.isPending}
-                            >
-                              <Link2Off className="h-4 w-4" />
-                            </Button>
-                          </>
+                          <Button
+                            variant="destructive"
+                            size="sm"
+                            onClick={() => handleDisconnect(config)}
+                            disabled={disconnect.isPending}
+                          >
+                            <Link2Off className="h-4 w-4" />
+                          </Button>
                         )}
                       </div>
                     </div>
 
-                    {/* Status / Warning row */}
-                    {config.isConnected && (
-                      <div className="flex flex-wrap items-center gap-2 text-xs">
-                        {/* Sync in progress */}
-                        {syncStatus?.lastSyncAt && (
-                          <span className="text-muted-foreground">
-                            <RefreshCw className="h-3 w-3 inline mr-1" />
-                            Last sync: {new Date(syncStatus.lastSyncAt).toLocaleDateString()}
-                          </span>
-                        )}
-
-                        {/* Unmatched warning */}
-                        {unmatchedCount > 0 && (
-                          <span className="text-amber-500 dark:text-amber-400 font-medium">
-                            ⚠ {unmatchedCount} series need matching
-                          </span>
-                        )}
-
-                        {/* Sync in progress from autoMatchAll */}
-                        {autoMatchAll.isPending && (
-                          <span className="text-amber-500 dark:text-amber-400">
-                            <RefreshCw className="h-3 w-3 inline mr-1 animate-spin" />
-                            Auto-matching in progress...
-                          </span>
-                        )}
-                      </div>
-                    )}
-
-                    {/* Connect form (only when disconnected) */}
+                    {/* Connect form (only when not connected) */}
                     {!config.isConnected && (
                       <div className="flex items-start justify-end">
                         {config.supportsDirectAuth ? (
@@ -394,17 +352,6 @@ export function UserTrackerRequester({ open, onOpenChange }: UserTrackerRequeste
           )}
         </DialogContent>
       </Dialog>
-
-      {/* Series Mappings Dialog */}
-      {selectedMappingsProvider !== null && (
-        <SeriesMappingRequester
-          open={true}
-          onOpenChange={(open: boolean) => {
-            if (!open) setSelectedMappingsProvider(null);
-          }}
-          provider={selectedMappingsProvider}
-        />
-      )}
     </>
   );
 }

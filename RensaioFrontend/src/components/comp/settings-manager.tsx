@@ -18,12 +18,13 @@ import { userService } from "@/lib/api/services/userService";
 import { UserIcon, Upload } from "lucide-react";
 import { fetchGravatarBase64 } from "@/lib/gravatar";
 import { Badge } from "@/components/ui/badge";
-import { Plus, X, Save, Loader2, GripVertical, ChevronDown } from "lucide-react";
+import { Plus, X, Save, Loader2, GripVertical, ChevronDown, BadgeCheck, AlertCircle } from "lucide-react";
 import { useRouter } from "next/navigation";
 import {
   useSettings,
   useAvailableLanguages,
   useUpdateSettings,
+  useVerifyContributor,
 } from "@/lib/api/hooks/useSettings";
 import { type Settings, NsfwVisibility } from "@/lib/api/types";
 import { useToast } from "@/hooks/use-toast";
@@ -1205,6 +1206,195 @@ function SecuritySection({
   );
 }
 
+// Contribution Settings Section
+function ContributionSection({
+  localSettings,
+  setLocalSettings,
+}: {
+  localSettings: Settings;
+  setLocalSettings: (updater: (prev: Settings) => Settings) => void;
+}) {
+  const isEnabled = localSettings.contributionEnabled;
+  const { toast } = useToast();
+  const verifyMutation = useVerifyContributor();
+
+  const handleVerify = () => {
+    const serverUrl = localSettings.contributionServerUrl?.trim();
+    const contributorId = localSettings.contributionContributorId?.trim();
+
+    if (!serverUrl || !isValidUrl(serverUrl)) {
+      toast({
+        title: "Validation Error",
+        description: "Enter a valid Contribution Server URL before verifying.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    if (!contributorId) {
+      toast({
+        title: "Validation Error",
+        description: "Enter your Contributor Id before verifying.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    verifyMutation.mutate(
+      { serverUrl, contributorId },
+      {
+        onSuccess: (result) => {
+          if (result.contributionVerified) {
+            // Persist the verified flag locally so the UI reflects immediately,
+            // even before the settings query refetches.
+            setLocalSettings((prev) => ({
+              ...prev,
+              contributionVerified: true,
+            }));
+            toast({
+              title: "Contributor verified",
+              description: "Your Contributor Id is valid. Contribution features are now enabled.",
+            });
+          } else {
+            setLocalSettings((prev) => ({
+              ...prev,
+              contributionVerified: false,
+            }));
+            toast({
+              title: "Verification failed",
+              description: result.error ?? "Contributor could not be verified.",
+              variant: "destructive",
+            });
+          }
+        },
+        onError: (error) => {
+          setLocalSettings((prev) => ({
+            ...prev,
+            contributionVerified: false,
+          }));
+          toast({
+            title: "Verification error",
+            description: error instanceof Error ? error.message : "Failed to verify contributor.",
+            variant: "destructive",
+          });
+        },
+      },
+    );
+  };
+
+  return (
+    <CardContent className="space-y-4">
+      <div className="flex items-center space-x-2">
+        <Switch
+          id="contribution-enabled"
+          checked={localSettings.contributionEnabled}
+          onCheckedChange={(checked) => {
+            // Toggling the master switch resets the verified state local-only;
+            // the backend clears the persisted flag on save when disabled.
+            setLocalSettings((prev) => ({
+              ...prev,
+              contributionEnabled: checked,
+              ...(checked ? {} : { contributionVerified: false }),
+            }));
+          }}
+        />
+        <div>
+          <Label htmlFor="contribution-enabled">Enable Contribution</Label>
+          <p className="text-muted-foreground mt-1 text-sm">
+            When enabled, mapping actions propagate your series metadata, titles and
+            sources into the contribution server.
+          </p>
+        </div>
+      </div>
+
+      {/* Contributor Id — always visible like the SOCKS fields, editable only
+          once Contribution is enabled. */}
+      <div className="grid gap-4 md:grid-cols-2">
+        <div>
+          <Label htmlFor="contribution-contributor-id">Contributor Id</Label>
+          <Input
+            id="contribution-contributor-id"
+            type="text"
+            placeholder="00000000-0000-0000-0000-000000000000"
+            value={localSettings.contributionContributorId || ""}
+            onChange={(e) =>
+              setLocalSettings((prev) => ({
+                ...prev,
+                contributionContributorId: e.target.value,
+                contributionVerified: false,
+              }))
+            }
+            disabled={!isEnabled}
+          />
+          <p className="text-muted-foreground mt-1 text-sm">
+            Your Contributor UUID. It must be verified against the contribution
+            server before any contribution features unlock.
+          </p>
+        </div>
+        <div>
+          <Label htmlFor="contribution-server-url">Contribution Server URL</Label>
+          <Input
+            id="contribution-server-url"
+            type="text"
+            placeholder="https://contribution.rensaio.net"
+            value={localSettings.contributionServerUrl || ""}
+            onChange={(e) =>
+              setLocalSettings((prev) => ({
+                ...prev,
+                contributionServerUrl: e.target.value,
+              }))
+            }
+            disabled={!isEnabled}
+          />
+          <p className="text-muted-foreground mt-1 text-sm">
+            URL of the contribution server.
+          </p>
+        </div>
+      </div>
+
+      {isEnabled && (
+        <div className="flex items-center gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            onClick={handleVerify}
+            disabled={verifyMutation.isPending || !localSettings.contributionContributorId?.trim()}
+          >
+            {verifyMutation.isPending ? (
+              <>
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                Verifying...
+              </>
+            ) : (
+              <>
+                <BadgeCheck className="mr-2 h-4 w-4" />
+                Verify
+              </>
+            )}
+          </Button>
+
+          {localSettings.contributionVerified ? (
+            <Badge variant="default" className="gap-1">
+              <BadgeCheck className="h-3 w-3" />
+              Verified Contributor
+            </Badge>
+          ) : (
+            <Badge variant="secondary" className="gap-1">
+              <AlertCircle className="h-3 w-3" />
+              Not verified
+            </Badge>
+          )}
+          <span className="text-muted-foreground text-xs">
+            {localSettings.contributionVerified
+              ? "This Contributor Id is registered and active in the contribution server."
+              : "Verify your Contributor Id to enable contribution uploads and the Contribution page."}
+          </span>
+        </div>
+      )}
+    </CardContent>
+  );
+}
+
 // Advanced CEF / embedded browser settings — collapsed by default so normal users
 // are not exposed to low-level JCEF tuning. These map to the backend DTO's cef*
 // fields and flow through the existing Settings API unchanged.
@@ -1336,6 +1526,12 @@ const AVAILABLE_SECTIONS: SettingsSection[] = [
     title: "Security",
     description: "Configure authentication and security settings.",
     component: SecuritySection,
+  },
+  {
+    id: "contribution",
+    title: "Contribution",
+    description: "Configure contribution of your series metadata to the global contribution server.",
+    component: ContributionSection,
   },
   {
     id: "content-preferences",

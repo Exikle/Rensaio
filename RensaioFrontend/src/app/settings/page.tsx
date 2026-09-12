@@ -85,7 +85,13 @@ export default function SettingsPage() {
                           <Badge variant="default">Auto-matched ({Math.round((status.matchScore ?? 0) * 100)}%)</Badge>
                         )}
                         {status.mappingStatus === 3 && (
+                          <Badge variant="secondary">Temp. ignored</Badge>
+                        )}
+                        {status.mappingStatus === 4 && (
                           <Badge variant="secondary">Disabled</Badge>
+                        )}
+                        {status.mappingStatus === 5 && (
+                          <Badge variant="secondary">Blocked</Badge>
                         )}
                       </td>
                       <td className="py-2">

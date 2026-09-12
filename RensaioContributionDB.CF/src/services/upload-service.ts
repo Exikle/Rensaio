@@ -1,367 +1,648 @@
-import type { UploadItem } from '../models/requests';
-import type { UploadError, UploadResponse } from '../models/responses';
-import { SUPPORTED_ACTIONS, SUPPORTED_ENTITY_TYPES } from '../types';
-import { base64ToBlob } from '../utils/binary';
-
 /**
- * Process a batch of upload items for a single contributor.
+ * Process a ContributionSnapshotV1 upload batch for a single contributor.
  *
- * Actions:
- *   - `add` — unconditional UPSERT by identity key:
- *       * record missing → insert
- *       * record exists  → update (values + ownership transfer to caller)
- *       * record exists with IDENTICAL content (content_hash match) → skip
- *         entirely: no write, no ownership transfer. This kills the D1 write
- *         cost of every contributor sweep re-uploading unchanged rows.
- *   - `remove` — soft-delete ANY active record by identity key.
+ * Each entity row carries a `v` (replication version) field:
+ *   - 0  → add/update (UPSERT by identity key)
+ *   - -1 → logical delete (tombstone → set archived_at)
  *
- * Identity keys:
- *   - source:  `id` (contributor-provided identifier, DB PK)
- *   - metadata: title + metadata_provider + metadata_provider_key
+ * The five entity lists map to D1 tables:
+ *   t → titles            (TitleEntity; id = MD5(normalized title))
+ *   m → mapping_titles    (MappingTitleEntity)
+ *   s → sources           (ContributionSourceEntity)
+ *   i → series            (ContributionSeriesEntity — record flattened)
+ *   d → metadata          (ContributionMetadataEntity)
  *
- * Titles are resolved server-side (reuse active title by name, or create).
- * Concurrent title creation is race-safe: the UNIQUE partial index on active
- * titles + INSERT OR IGNORE + a follow-up SELECT guarantee the winning id is
- * returned instead of failing the whole batch.
+ * Mapping identity resolution (semantic, idempotent):
+ *   client mapping uuids are TRANSIENT intra-batch references. Before writing any
+ *   row we resolve each client mapping id to a CLOUD mapping id by looking for an
+ *   existing cloud mapping whose active mapping_titles overlap the batch's title
+ *   set for that client mapping (the same fuzzy rule the backend's
+ *   ResolveMappingAsync uses). If an overlap is found the client rows are folded
+ *   into the existing cloud mapping — two contributors tracking the same series
+ *   converge on ONE mappings row. Otherwise the client uuid is adopted as the
+ *   cloud mapping id.
  *
- * All valid statements run in a single D1 batch (atomic). Item-level
+ * Metadata identity (semantic dedup):
+ *   the unique key is the triple (mapping_id, provider_id, provider_key)
+ *   (migration 0005). `id` is a cloud-internal identifier: on conflict it is
+ *   KEPT (not in the SET clause) and the row is updated in place. mapping_status
+ *   merges by priority — UserConfirmed > Blocked > AutoMatched > ForeverIgnored >
+ *   TemporaryIgnored > Unmatched — so a manual decision can never be clobbered by
+ *   a weaker automated one; linked_date / contributor_id are last-writer-wins.
+ *
+ * Mappings referenced by `m`/`i`/`d` rows are created on demand from the
+ * resolved mapping ids.
+ *
+ * All valid statements run in a single D1 batch (atomic). Entity-level
  * validation errors are collected and returned.
  */
+import type {
+  ContributionMetadataEntityPayload,
+  ContributionSeriesEntityPayload,
+  ContributionSourceEntityPayload,
+  MappingTitleEntityPayload,
+  TitleEntityPayload,
+} from '../models/requests';
+import type { UploadError, UploadResponse } from '../models/responses';
+import {
+  REPLICATION_ADD_OR_UPDATE,
+  REPLICATION_DELETE,
+  SNAPSHOT_SCHEMA_VERSION,
+  SUPPORTED_ENTITY_TYPES,
+} from '../types';
+
+const TITLES = 't';
+const MAPPING_TITLES = 'm';
+const SOURCES = 's';
+const SERIES = 'i';
+const METADATA = 'd';
+
+/** Maximum statements per D1 batch (Cloudflare limit is 100). */
+const BATCH_CHUNK_SIZE = 95;
+
+/**
+ * Track provenance of every statement so a failed execution can be reported
+ * with the exact entity list + row index it belongs to.
+ */
+interface StmtRef {
+  list: string;
+  index: number;
+  stmt: D1PreparedStatement;
+}
+
+/**
+ * A single D1 batch result row. D1 emits one entry per statement; a statement
+ * failure is reported per-entry (success:false + error) and does NOT throw.
+ */
+interface BatchResult {
+  success?: boolean;
+  error?: string;
+  results?: unknown[];
+  meta?: { changes?: number };
+}
+
 export async function processUpload(
   db: D1Database,
   contributorId: string,
-  items: UploadItem[]
+  body: {
+    e?: number;
+    u?: string;
+    v?: number;
+    t?: TitleEntityPayload[];
+    m?: MappingTitleEntityPayload[];
+    s?: ContributionSourceEntityPayload[];
+    i?: ContributionSeriesEntityPayload[];
+    d?: ContributionMetadataEntityPayload[];
+  }
 ): Promise<UploadResponse> {
   const now = new Date().toISOString();
   const errors: UploadError[] = [];
-  const statements: D1PreparedStatement[] = [];
-  const titleCache = new Map<string, string>(); // title name → title id
-  let skipped = 0;
+  const refs: StmtRef[] = [];
 
-  for (let index = 0; index < items.length; index += 1) {
-    const item = items[index];
+  // ── 0. Schema version gate ──
+  if (body.e !== undefined && body.e !== SNAPSHOT_SCHEMA_VERSION) {
+    return {
+      processed: 0,
+      errors: [
+        { list: 'e', index: 0, message: `Unsupported schema version: ${body.e}` },
+      ],
+    };
+  }
 
-    const error = validateItem(item);
-    if (error) {
-      errors.push({ index, message: error });
+  // ─ 0.25 Fetch the current replication version from the singleton. Every row
+  // written by this upload is stamped with it, so the snapshot's per-row `v`
+  // reflects "which replication generation produced this row".
+  let replicationVersion: number;
+  try {
+    const row = await db
+      .prepare('SELECT version FROM replication WHERE id = 1')
+      .first<{ version: number }>();
+    replicationVersion = row?.version ?? 0;
+  } catch (err) {
+    console.error('Failed to read replication version, defaulting to 0:', err);
+    replicationVersion = 0;
+  }
+
+  // ─ 0.5 Resolve client mapping ids → cloud mapping ids ──
+  // Must happen before any statement is built so series/metadata/mapping_titles
+  // all reference the same resolved id for a given client mapping.
+  let mappingIdMap: Map<string, string> = new Map();
+  try {
+    mappingIdMap = await resolveMappingIds(db, body);
+  } catch (err) {
+    // Resolution is best-effort: on failure fall back to client uuids (worst
+    // case a duplicate mapping row, no data loss). Surface as a warning.
+    console.error('Mapping resolution failed, falling back to client ids:', err);
+  }
+
+  // ─ 1. Titles ──
+  if (body.t) {
+    for (let i = 0; i < body.t.length; i += 1) {
+      const row = body.t[i];
+      try {
+        for (const stmt of buildTitleStatements(db, row, contributorId, replicationVersion, now)) {
+          refs.push({ list: TITLES, index: i, stmt });
+        }
+      } catch (err) {
+        errors.push({ list: TITLES, index: i, message: errMessage(err) });
+      }
+    }
+  }
+
+  // ── 2. Mapping titles (implicitly create mappings) ──
+  if (body.m) {
+    for (let i = 0; i < body.m.length; i += 1) {
+      const row = body.m[i];
+      try {
+        for (const stmt of buildMappingTitleStatements(
+          db, row, mappingIdMap, contributorId, replicationVersion, now
+        )) {
+          refs.push({ list: MAPPING_TITLES, index: i, stmt });
+        }
+      } catch (err) {
+        errors.push({ list: MAPPING_TITLES, index: i, message: errMessage(err) });
+      }
+    }
+  }
+
+  // ── 3. Sources (canonical) ──
+  if (body.s) {
+    for (let i = 0; i < body.s.length; i += 1) {
+      const row = body.s[i];
+      try {
+        for (const stmt of buildSourceStatements(db, row, contributorId, replicationVersion, now)) {
+          refs.push({ list: SOURCES, index: i, stmt });
+        }
+      } catch (err) {
+        errors.push({ list: SOURCES, index: i, message: errMessage(err) });
+      }
+    }
+  }
+
+  // ── 4. Series ──
+  if (body.i) {
+    for (let i = 0; i < body.i.length; i += 1) {
+      const row = body.i[i];
+      try {
+        for (const stmt of buildSeriesStatements(
+          db, row, mappingIdMap, contributorId, replicationVersion, now
+        )) {
+          refs.push({ list: SERIES, index: i, stmt });
+        }
+      } catch (err) {
+        errors.push({ list: SERIES, index: i, message: errMessage(err) });
+      }
+    }
+  }
+
+  // ── 5. Metadata ──
+  if (body.d) {
+    for (let i = 0; i < body.d.length; i += 1) {
+      const row = body.d[i];
+      try {
+        for (const stmt of buildMetadataStatements(
+          db, row, mappingIdMap, contributorId, replicationVersion, now
+        )) {
+          refs.push({ list: METADATA, index: i, stmt });
+        }
+      } catch (err) {
+        errors.push({ list: METADATA, index: i, message: errMessage(err) });
+      }
+    }
+  }
+
+  // ── 6. Execute in chunks, reconciling EVERY statement's actual result. ──
+  // D1's batch() reports per-statement failures in the result array without
+  // throwing — the old code ignored those and reported success for all. Now we
+  // surface each failure with its entity list + row index so the client can
+  // retry precisely the rows that failed.
+  let processed = 0;
+  for (let offset = 0; offset < refs.length; offset += BATCH_CHUNK_SIZE) {
+    const chunk = refs.slice(offset, offset + BATCH_CHUNK_SIZE);
+    const results = await db.batch(chunk.map((r) => r.stmt));
+    for (let k = 0; k < chunk.length; k += 1) {
+      const ref = chunk[k];
+      const res = results[k] as BatchResult | undefined;
+
+      let ok: boolean;
+      let errorMsg: string | undefined;
+      if (!res) {
+        ok = false;
+        errorMsg = 'No batch result for statement';
+      } else if (res.success === false || res.error) {
+        ok = false;
+        errorMsg = res.error ?? `Statement failed (success=${res.success})`;
+      } else {
+        // success === true (or undefined) with no error → applied.
+        ok = true;
+      }
+
+      if (ok) {
+        processed += 1;
+      } else {
+        errors.push({ list: ref.list, index: ref.index, message: errorMsg ?? 'Unknown batch error' });
+      }
+    }
+  }
+
+  return { processed, errors };
+}
+
+// ── Mapping identity resolution ──────────────────────────────────────────────
+
+/**
+ * Resolves each client mapping id referenced by the batch to a CLOUD mapping id.
+ *
+ * For a client mapping with title set T we look for an existing ACTIVE cloud
+ * mapping whose `mapping_titles` overlap T (most-overlapping wins). Found →
+ * reuse the cloud mapping id (dedup across contributors). Not found → the
+ * client uuid is adopted as the cloud mapping id.
+ */
+async function resolveMappingIds(
+  db: D1Database,
+  body: {
+    m?: MappingTitleEntityPayload[];
+    i?: ContributionSeriesEntityPayload[];
+    d?: ContributionMetadataEntityPayload[];
+  }
+): Promise<Map<string, string>> {
+  const resolved = new Map<string, string>();
+
+  // 1. Collect the client mapping ids and their title sets.
+  const titlesByClientMapping = new Map<string, Set<string>>();
+  for (const row of body.m ?? []) {
+    let set = titlesByClientMapping.get(row.m);
+    if (!set) {
+      set = new Set();
+      titlesByClientMapping.set(row.m, set);
+    }
+    set.add(row.t);
+  }
+  // Series / metadata reference mappings without defining their titles —
+  // include them so they resolve too (empty set → adopt client uuid).
+  const referenced = new Set<string>(titlesByClientMapping.keys());
+  for (const row of body.i ?? []) referenced.add(row.m);
+  for (const row of body.d ?? []) referenced.add(row.m);
+
+  if (referenced.size === 0) return resolved;
+
+  // 2. Collect all distinct title ids so we can load the relevant mapping_titles
+  //    rows in a bounded number of queries (chunked IN lists).
+  const allTitleIds = new Set<string>();
+  for (const set of titlesByClientMapping.values()) {
+    for (const t of set) allTitleIds.add(t);
+  }
+
+  const titleChunks = chunk([...allTitleIds], 40);
+  const existingByTitle = new Map<string, string[]>();
+  for (const chunk of titleChunks) {
+    if (chunk.length === 0) continue;
+    const placeholders = chunk.map(() => '?').join(',');
+    const result = await db
+      .prepare(
+        `SELECT mapping_id, title_id
+         FROM mapping_titles
+         WHERE archived_at IS NULL AND title_id IN (${placeholders})`
+      )
+      .bind(...chunk)
+      .all<{ mapping_id: string; title_id: string }>();
+    for (const r of result.results ?? []) {
+      let mappingIds = existingByTitle.get(r.title_id);
+      if (!mappingIds) {
+        mappingIds = [];
+        existingByTitle.set(r.title_id, mappingIds);
+      }
+      mappingIds.push(r.mapping_id);
+    }
+  }
+
+  // 3. For each client mapping, pick the cloud mapping with the most shared titles.
+  for (const clientId of referenced) {
+    const titleSet = titlesByClientMapping.get(clientId) ?? new Set<string>();
+    if (titleSet.size === 0) {
+      // No titles to match on — adopt the client uuid (ensureMapping creates it).
+      resolved.set(clientId, clientId);
       continue;
     }
 
-    try {
-      if (item.action === 'add') {
-        const statement = await buildUpsertStatement(db, item, contributorId, now, titleCache);
-        if (statement) {
-          statements.push(statement);
-        } else {
-          // Content identical to what is already stored — nothing to write.
-          skipped += 1;
-        }
-      } else {
-        // remove
-        statements.push(await buildRemoveStatement(db, item, now, titleCache));
+    const overlapCount = new Map<string, number>();
+    for (const titleId of titleSet) {
+      for (const cloudId of existingByTitle.get(titleId) ?? []) {
+        overlapCount.set(cloudId, (overlapCount.get(cloudId) ?? 0) + 1);
       }
-    } catch (err) {
-      errors.push({ index, message: err instanceof Error ? err.message : 'Unknown error' });
     }
+
+    let bestCloud: string | undefined;
+    let bestCount = 0;
+    for (const [cloudId, count] of overlapCount) {
+      if (count > bestCount) {
+        bestCloud = cloudId;
+        bestCount = count;
+      }
+    }
+
+    resolved.set(clientId, bestCloud ?? clientId);
   }
 
-  // Execute all valid statements atomically (D1 batch is transactional).
-  if (statements.length > 0) {
-    await db.batch(statements);
-  }
-
-  return { processed: statements.length, skipped, errors };
+  return resolved;
 }
 
-/**
- * Resolve a title name to a title id.
- * Reuses an existing ACTIVE title with the same name, or creates a new title
- * record. Results are cached per request.
- *
- * The create path is race-safe: `INSERT OR IGNORE` plus a follow-up SELECT
- * returns the id of whichever request won the race (backed by the UNIQUE
- * partial index on active titles), so concurrent uploads never fail the batch
- * with a primary-key violation.
- */
-async function resolveTitle(
-  db: D1Database,
-  title: string,
-  titleCache: Map<string, string>
-): Promise<string> {
-  const cached = titleCache.get(title);
-  if (cached) {
-    return cached;
-  }
-
-  const existing = await db
-    .prepare('SELECT id FROM titles WHERE title = ? AND archived_at IS NULL LIMIT 1')
-    .bind(title)
-    .first<{ id: string }>();
-
-  if (existing) {
-    titleCache.set(title, existing.id);
-    return existing.id;
-  }
-
-  // Create a new title. If a concurrent request created the same title
-  // between our SELECT and this INSERT, OR IGNORE swallows the conflict.
-  const id = crypto.randomUUID();
-  await db
-    .prepare('INSERT OR IGNORE INTO titles (id, title, archived_at) VALUES (?, ?, NULL)')
-    .bind(id, title)
-    .run();
-
-  // Whichever request won, resolve the actual stored id (ours or theirs).
-  const row = await db
-    .prepare('SELECT id FROM titles WHERE title = ? AND archived_at IS NULL LIMIT 1')
-    .bind(title)
-    .first<{ id: string }>();
-
-  const resolvedId = row?.id ?? id;
-  titleCache.set(title, resolvedId);
-  return resolvedId;
+/** Resolve a client mapping id to the cloud mapping id (defaults to the client id). */
+function resolveMapping(mappingIdMap: Map<string, string>, clientId: string): string {
+  return mappingIdMap.get(clientId) ?? clientId;
 }
 
-/**
- * Build the upsert statement for an `add` item.
- *
- * Returns `null` when the incoming content matches the stored `content_hash`
- * (no write, ownership preserved). Otherwise returns an INSERT or UPDATE.
- *
- * IMPORTANT: `id` is the PRIMARY KEY for sources, so the existence check
- * matches REGARDLESS of `archived_at`. If the row exists (active or
- * archived), we UPDATE and clear `archived_at` (resurrect) — otherwise the
- * INSERT would violate the primary-key constraint.
- */
-async function buildUpsertStatement(
+// ── Titles ───────────────────────────────────────────────────────────────────
+
+function buildTitleStatements(
   db: D1Database,
-  item: UploadItem,
+  row: TitleEntityPayload,
   contributorId: string,
-  now: string,
-  titleCache: Map<string, string>
-): Promise<D1PreparedStatement | null> {
-  const { type, data } = item;
-  const dataBlob = base64ToBlob(data.data);
-  const titleId = await resolveTitle(db, data.title as string, titleCache);
-
-  switch (type) {
-    case 'source': {
-      const incomingHash = await hashSourceContent(titleId, dataBlob);
-      const existing = await db
-        .prepare('SELECT content_hash, archived_at FROM sources WHERE id = ? LIMIT 1')
-        .bind(data.id)
-        .first<{ content_hash: string | null; archived_at: string | null }>();
-
-      if (!existing) {
-        // insert. OR IGNORE makes a concurrent same-id insert harmless
-        // instead of failing the whole batch with a PK violation.
-        return db
-          .prepare(
-            `INSERT OR IGNORE INTO sources (id, title_id, data, contributor_id, last_change, archived_at, content_hash)
-             VALUES (?, ?, ?, ?, ?, NULL, ?)`
-          )
-          .bind(data.id, titleId, dataBlob, contributorId, now, incomingHash);
-      }
-
-      // Identical active content → skip the write (and the ownership steal).
-      if (existing.archived_at === null && existing.content_hash === incomingHash) {
-        return null;
-      }
-
-      // update + ownership transfer + clear archived_at (resurrect if archived)
-      return db
+  replicationVersion: number,
+  now: string
+): D1PreparedStatement[] {
+  validateRow(row, ['i', 't', 'v']);
+  if (row.v === REPLICATION_DELETE) {
+    // Tombstone: keep replication_version = -1 (delete marker) so consumers can
+    // distinguish a delete from an add at a given replication version.
+    return [
+      db
         .prepare(
-          `UPDATE sources
-           SET title_id = ?, data = ?, contributor_id = ?, last_change = ?, archived_at = NULL, content_hash = ?
-           WHERE id = ?`
+          'UPDATE titles SET replication_version = ?, archived_at = ?, contributor_id = ? WHERE id = ?'
         )
-        .bind(titleId, dataBlob, contributorId, now, incomingHash, data.id);
-    }
-    case 'metadata': {
-      const metadataProvider = data.metadata_provider as string;
-      const metadataProviderKey = data.metadata_provider_key as string;
-      const linkType = data.link_type as number;
-      const incomingHash = await hashMetadataContent(titleId, metadataProvider, metadataProviderKey, linkType);
-      const existing = await db
-        .prepare(
-          `SELECT content_hash FROM metadata
-           WHERE title_id = ? AND metadata_provider = ? AND metadata_provider_key = ?
-             AND archived_at IS NULL
-           LIMIT 1`
-        )
-        .bind(titleId, metadataProvider, metadataProviderKey)
-        .first<{ content_hash: string | null }>();
-
-      if (!existing) {
-        // insert. OR IGNORE makes a concurrent same-identity insert harmless
-        // (guarded by the UNIQUE partial index on active metadata identity).
-        return db
-          .prepare(
-            `INSERT OR IGNORE INTO metadata (id, title_id, metadata_provider, metadata_provider_key, link_type, contributor_id, last_change, archived_at, content_hash)
-             VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?)`
-          )
-          .bind(
-            crypto.randomUUID(),
-            titleId,
-            metadataProvider,
-            metadataProviderKey,
-            linkType,
-            contributorId,
-            now,
-            incomingHash
-          );
-      }
-
-      // Identical active content → skip the write (and the ownership steal).
-      if (existing.content_hash === incomingHash) {
-        return null;
-      }
-
-      // update + ownership transfer
-      return db
-        .prepare(
-          `UPDATE metadata
-           SET link_type = ?, contributor_id = ?, last_change = ?, content_hash = ?
-           WHERE title_id = ? AND metadata_provider = ? AND metadata_provider_key = ?
-             AND archived_at IS NULL`
-        )
-        .bind(
-          linkType,
-          contributorId,
-          now,
-          incomingHash,
-          titleId,
-          metadataProvider,
-          metadataProviderKey
-        );
-    }
-    default:
-      throw new Error(`Unsupported type: ${type}`);
+        .bind(row.v, now, contributorId, row.i),
+    ];
   }
+  // Upsert by id (MD5 of normalized title). Stamp the current replication
+  // version (not the client's 0) and the last contributor that touched it.
+  return [
+    db
+      .prepare(
+        `INSERT OR IGNORE INTO titles (id, title, replication_version, contributor_id, archived_at)
+         VALUES (?, ?, ?, ?, NULL)
+         ON CONFLICT(id) DO UPDATE SET
+           title = excluded.title,
+           replication_version = excluded.replication_version,
+           contributor_id = excluded.contributor_id,
+           archived_at = NULL`
+      )
+      .bind(row.i, row.t, replicationVersion, contributorId),
+  ];
 }
 
-/**
- * Build a soft-delete statement for a `remove` item.
- */
-async function buildRemoveStatement(
+// ── Mapping titles ───────────────────────────────────────────────────────────
+
+function buildMappingTitleStatements(
   db: D1Database,
-  item: UploadItem,
-  now: string,
-  titleCache: Map<string, string>
-): Promise<D1PreparedStatement> {
-  const { type, data } = item;
-
-  switch (type) {
-    case 'source':
-      return db
-        .prepare('UPDATE sources SET archived_at = ? WHERE id = ? AND archived_at IS NULL')
-        .bind(now, data.id);
-    case 'metadata': {
-      const titleId = await resolveTitle(db, data.title as string, titleCache);
-      return db
+  row: MappingTitleEntityPayload,
+  mappingIdMap: Map<string, string>,
+  _contributorId: string,
+  _replicationVersion: number,
+  now: string
+): D1PreparedStatement[] {
+  validateRow(row, ['m', 't', 'v']);
+  const mappingId = resolveMapping(mappingIdMap, row.m);
+  const ensureMapping = db
+    .prepare('INSERT OR IGNORE INTO mappings (id) VALUES (?)')
+    .bind(mappingId);
+  if (row.v === REPLICATION_DELETE) {
+    return [
+      ensureMapping,
+      db
         .prepare(
-          `UPDATE metadata
-           SET archived_at = ?
-           WHERE title_id = ? AND metadata_provider = ? AND metadata_provider_key = ?
+          'UPDATE mapping_titles SET last_change = ?, archived_at = ? WHERE mapping_id = ? AND title_id = ?'
+        )
+        .bind(now, now, mappingId, row.t),
+    ];
+  }
+  return [
+    ensureMapping,
+    db
+      .prepare(
+        `INSERT OR IGNORE INTO mapping_titles (mapping_id, title_id, last_change, archived_at)
+         VALUES (?, ?, ?, NULL)
+         ON CONFLICT(mapping_id, title_id) DO UPDATE SET last_change = excluded.last_change, archived_at = NULL`
+      )
+      .bind(mappingId, row.t, now),
+  ];
+}
+
+// ── Sources (canonical) ──────────────────────────────────────────────────────
+
+function buildSourceStatements(
+  db: D1Database,
+  row: ContributionSourceEntityPayload,
+  contributorId: string,
+  replicationVersion: number,
+  now: string
+): D1PreparedStatement[] {
+  validateRow(row, ['i', 'p', 's', 'v']);
+  if (row.v === REPLICATION_DELETE) {
+    // Tombstone: architecture row; keep replication_version = -1.
+    return [
+      db
+        .prepare(
+          'UPDATE sources SET replication_version = ?, archived_at = ?, contributor_id = ? WHERE id = ?'
+        )
+        .bind(row.v, now, contributorId, row.i),
+    ];
+  }
+  // Upsert by id; ON CONFLICT resurrects an archived row (archived_at = NULL).
+  // Stamp contributor + replication version on every write.
+  return [
+    db
+      .prepare(
+        `INSERT INTO sources (
+            id, package, source_id, source_name, source_language,
+            last_batch_utc, contributor_id, replication_version, archived_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
+         ON CONFLICT(id) DO UPDATE SET
+           package = excluded.package,
+           source_id = excluded.source_id,
+           source_name = excluded.source_name,
+           source_language = excluded.source_language,
+           last_batch_utc = excluded.last_batch_utc,
+           contributor_id = excluded.contributor_id,
+           replication_version = excluded.replication_version,
+           archived_at = NULL`
+      )
+      .bind(
+        row.i,
+        row.p,
+        row.s,
+        row.n ?? '',
+        row.l ?? '',
+        row.b ?? null,
+        contributorId,
+        replicationVersion
+      ),
+  ];
+}
+
+// ── Series ───────────────────────────────────────────────────────────────────
+
+function buildSeriesStatements(
+  db: D1Database,
+  row: ContributionSeriesEntityPayload,
+  mappingIdMap: Map<string, string>,
+  contributorId: string,
+  replicationVersion: number,
+  now: string
+): D1PreparedStatement[] {
+  validateRow(row, ['i', 'm', 's', 'd', 'v']);
+  const rec = row.d;
+  const mappingId = resolveMapping(mappingIdMap, row.m);
+  const ensureMapping = db
+    .prepare('INSERT OR IGNORE INTO mappings (id) VALUES (?)')
+    .bind(mappingId);
+  if (row.v === REPLICATION_DELETE) {
+    return [
+      ensureMapping,
+      db
+        .prepare(
+          'UPDATE series SET replication_version = ?, archived_at = ?, contributor_id = ? WHERE id = ?'
+        )
+        .bind(row.v, now, contributorId, row.i),
+    ];
+  }
+  return [
+    ensureMapping,
+    db
+      .prepare(
+        `INSERT INTO series
+           (id, mapping_id, source_id, title_id, thumbnail_url, status,
+            seen_in_popular, seen_in_latest, last_chapter, last_update_utc,
+            contributor_id, replication_version, archived_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+         ON CONFLICT(id) DO UPDATE SET
+           mapping_id = excluded.mapping_id,
+           source_id = excluded.source_id,
+           title_id = excluded.title_id,
+           thumbnail_url = excluded.thumbnail_url,
+           status = excluded.status,
+           seen_in_popular = excluded.seen_in_popular,
+           seen_in_latest = excluded.seen_in_latest,
+           last_chapter = excluded.last_chapter,
+           last_update_utc = excluded.last_update_utc,
+           contributor_id = excluded.contributor_id,
+           replication_version = excluded.replication_version,
+           archived_at = NULL`
+      )
+      .bind(
+        row.i,
+        mappingId,
+        row.s,
+        rec.i,
+        rec.t ?? null,
+        rec.s ?? 0,
+        rec.p ? 1 : 0,
+        rec.e ? 1 : 0,
+        rec.l ?? null,
+        rec.u ?? null,
+        contributorId,
+        replicationVersion
+      ),
+  ];
+}
+
+// ── Metadata ─────────────────────────────────────────────────────────────────
+
+// The conflict target must match the migration-0005 PARTIAL unique index
+// (WHERE archived_at IS NULL) exactly, or SQLite rejects the upsert.
+const METADATA_INSERT = `INSERT INTO metadata
+   (id, mapping_id, provider_id, provider_key, mapping_status, linked_date,
+    contributor_id, replication_version, archived_at)
+ VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
+ ON CONFLICT(mapping_id, provider_id, provider_key) WHERE archived_at IS NULL DO UPDATE SET
+   mapping_status = CASE
+     -- Strongest intent survives; weaker uploads cannot clobber manual decisions.
+     -- In DO UPDATE expressions, existing-row columns are referenced unqualified.
+     WHEN mapping_status = 2 OR excluded.mapping_status = 2 THEN 2  -- UserConfirmed
+     WHEN mapping_status = 5 OR excluded.mapping_status = 5 THEN 5  -- Blocked
+     WHEN mapping_status = 1 OR excluded.mapping_status = 1 THEN 1  -- AutoMatched
+     WHEN mapping_status = 4 OR excluded.mapping_status = 4 THEN 4  -- ForeverIgnored
+     WHEN mapping_status = 3 OR excluded.mapping_status = 3 THEN 3  -- TemporaryIgnored
+     ELSE 0                                                         -- Unmatched
+   END,
+   linked_date = excluded.linked_date,
+   contributor_id = excluded.contributor_id,
+   replication_version = excluded.replication_version,
+   archived_at = NULL`;
+
+function buildMetadataStatements(
+  db: D1Database,
+  row: ContributionMetadataEntityPayload,
+  mappingIdMap: Map<string, string>,
+  contributorId: string,
+  replicationVersion: number,
+  now: string
+): D1PreparedStatement[] {
+  validateRow(row, ['i', 'm', 'p']);
+  const mappingId = resolveMapping(mappingIdMap, row.m);
+  const providerKey = row.k ?? '';
+  const ensureMapping = db
+    .prepare('INSERT OR IGNORE INTO mappings (id) VALUES (?)')
+    .bind(mappingId);
+  if (row.v === REPLICATION_DELETE) {
+    return [
+      ensureMapping,
+      db
+        .prepare(
+          `UPDATE metadata SET replication_version = ?, archived_at = ?, contributor_id = ?
+           WHERE mapping_id = ? AND provider_id = ? AND provider_key = ?
              AND archived_at IS NULL`
         )
-        .bind(now, titleId, data.metadata_provider, data.metadata_provider_key);
-    }
-    default:
-      throw new Error(`Unsupported type: ${type}`);
+        .bind(row.v, now, contributorId, mappingId, row.p, providerKey),
+    ];
   }
+  // The incoming client `id` is used only when no semantic row exists yet — on
+  // conflict it is KEPT (not in the SET clause). Dedup is by the triple.
+  return [
+    ensureMapping,
+    db
+      .prepare(METADATA_INSERT)
+      .bind(
+        row.i,
+        mappingId,
+        row.p,
+        providerKey,
+        row.s ?? 0,
+        row.u ?? null,
+        contributorId,
+        replicationVersion
+      ),
+  ];
 }
 
-/**
- * SHA-256 of a byte sequence, hex-encoded.
- */
-async function hashHex(bytes: Uint8Array): Promise<string> {
-  const digest = await crypto.subtle.digest('SHA-256', bytes);
-  return [...new Uint8Array(digest)]
-    .map((b) => b.toString(16).padStart(2, '0'))
-    .join('');
-}
+// ── Validation helpers ───────────────────────────────────────────────────────
 
-/**
- * Content hash for a source row: title_id + data bytes.
- * Includes title_id so re-titling an existing source id is detected.
- */
-async function hashSourceContent(titleId: string, data: ArrayBuffer | null): Promise<string> {
-  const titleBytes = new TextEncoder().encode(titleId);
-  if (!data || data.byteLength === 0) {
-    return hashHex(titleBytes);
+function validateRow(row: unknown, required: string[]): void {
+  if (!row || typeof row !== 'object' || Array.isArray(row)) {
+    throw new Error('Entity row must be an object');
   }
-  const combined = new Uint8Array(titleBytes.length + data.byteLength);
-  combined.set(titleBytes);
-  combined.set(new Uint8Array(data), titleBytes.length);
-  return hashHex(combined);
-}
-
-/**
- * Content hash for a metadata row: identity key + link_type.
- */
-async function hashMetadataContent(
-  titleId: string,
-  provider: string,
-  providerKey: string,
-  linkType: number
-): Promise<string> {
-  const content = `${titleId}\u0000${provider}\u0000${providerKey}\u0000${linkType}`;
-  return hashHex(new TextEncoder().encode(content));
-}
-
-/**
- * Validate a single upload item structurally.
- * Returns an error message string, or null when valid.
- */
-function validateItem(item: UploadItem): string | null {
-  if (!item || typeof item !== 'object') {
-    return 'Item must be an object';
+  const obj = row as Record<string, unknown>;
+  const v = obj.v;
+  if (v !== REPLICATION_ADD_OR_UPDATE && v !== REPLICATION_DELETE) {
+    throw new Error(`Invalid replication version (v): ${String(v)} — must be 0 or -1`);
   }
-
-  if (!SUPPORTED_ENTITY_TYPES.has(item.type)) {
-    return `Unsupported type: ${String(item.type)}`;
-  }
-
-  if (!SUPPORTED_ACTIONS.has(item.action)) {
-    return `Unsupported action: ${String(item.action)}`;
-  }
-
-  const data = item.data;
-  if (!data || typeof data !== 'object' || Array.isArray(data)) {
-    return 'data must be an object';
-  }
-
-  switch (item.type) {
-    case 'source': {
-      if (typeof data.id !== 'string' || data.id.length === 0) {
-        return 'source requires a non-empty "id" string';
-      }
-      if (typeof data.title !== 'string' || data.title.length === 0) {
-        return 'source requires a non-empty "title" string';
-      }
-      // data (binary payload) is optional; if present it must be base64
-      if (data.data !== undefined && data.data !== null && typeof data.data !== 'string') {
-        return 'source "data" must be a base64-encoded string';
-      }
-      break;
-    }
-    case 'metadata': {
-      if (typeof data.title !== 'string' || data.title.length === 0) {
-        return 'metadata requires a non-empty "title" string';
-      }
-      if (typeof data.metadata_provider !== 'string' || data.metadata_provider.length === 0) {
-        return 'metadata requires a non-empty "metadata_provider"';
-      }
-      if (typeof data.metadata_provider_key !== 'string' || data.metadata_provider_key.length === 0) {
-        return 'metadata requires a non-empty "metadata_provider_key"';
-      }
-      if (typeof data.link_type !== 'number') {
-        return 'metadata requires a numeric "link_type"';
-      }
-      break;
+  for (const key of required) {
+    const val = obj[key];
+    if (val === undefined || val === null || val === '') {
+      throw new Error(`Missing required field "${key}"`);
     }
   }
-
-  return null;
 }
+
+function chunk<T>(items: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) {
+    out.push(items.slice(i, i + size));
+  }
+  return out;
+}
+
+function errMessage(err: unknown): string {
+  return err instanceof Error ? err.message : 'Unknown error';
+}
+
+export { SUPPORTED_ENTITY_TYPES };

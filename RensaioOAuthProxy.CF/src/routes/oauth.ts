@@ -1,12 +1,12 @@
 import { Hono } from 'hono';
 import type { Env } from '../types';
-import { SUPPORTED_PROVIDERS, PROVIDER_DISPLAY_NAMES } from '../types';
+import { SUPPORTED_PROVIDERS, PROVIDER_DISPLAY_NAMES, resolveProviderFlow } from '../types';
 import { generateAuthUrl, exchangeCode, refreshToken } from '../services/provider-api';
 import { store, retrieve, setTokens, remove } from '../services/token-store';
-import { renderCallbackHtml, renderErrorHtml } from '../utils/callback-html';
+import { renderCallbackHtml, renderErrorHtml, renderImplicitCaptureHtml } from '../utils/callback-html';
 import { generateCodeVerifier } from '../utils/pkce';
 import type { ErrorResponse, OAuthUrlResponse, TokenRetrieveResponse, TokenRefreshResponse } from '../models/responses';
-import type { TokenRetrieveRequest, TokenRefreshRequest } from '../models/requests';
+import type { TokenRetrieveRequest, TokenRefreshRequest, ImplicitTokenCallbackRequest } from '../models/requests';
 
 /**
  * OAuth routes.
@@ -16,9 +16,16 @@ import type { TokenRetrieveRequest, TokenRefreshRequest } from '../models/reques
  *
  * Endpoints:
  *   POST /:provider/url       → GetAuthUrl()        (lines 25-47)
- *   GET  /:provider/callback  → Callback()           (lines 49-113)
+ *   GET  /:provider/callback  → Callback()           (lines 49-113, implicit flow)
+ *   POST /:provider/callback  → ImplicitCallback()   (NEW: persists implicit token)
  *   POST /:provider/token     → GetToken()           (lines 115-133)
  *   POST /:provider/refresh   → RefreshToken()       (lines 135-159)
+ *
+ * Dual-flow support (AniList):
+ *   - code flow:       GET callback exchanges the code server-side (unchanged)
+ *   - implicit flow:   GET callback serves a JS capture page that reads the
+ *     access_token from the URL fragment and POSTs it to this server
+ *     (POST /:provider/callback) for persistence. No client_secret involved.
  */
 const oauthRoutes = new Hono<{ Bindings: Env }>();
 
@@ -83,13 +90,29 @@ oauthRoutes.get('/:provider/callback', async (c) => {
   const state = c.req.query('state');
   const redirectUriQuery = c.req.query('redirectUri');
 
+  if (!SUPPORTED_PROVIDERS.has(provider)) {
+    return c.json<ErrorResponse>({ error: `Unsupported provider: ${provider}` }, 400);
+  }
+
+  const displayName = PROVIDER_DISPLAY_NAMES[provider] ?? provider;
+  const flow = resolveProviderFlow(provider, c.env);
+
+  // ── Implicit flow: serve the capture page ──
+  // AniList redirects here with the access token in the URL FRAGMENT
+  // (#access_token=...&expires_in=...). The fragment never reaches the server,
+  // so no code/state query params are expected. We serve an HTML page whose JS
+  // parses the fragment, resolves the state, and POSTs the token back to
+  // POST /:provider/callback for persistence.
+  if (flow === 'implicit') {
+    const html = renderImplicitCaptureHtml(displayName, provider, state ?? '');
+    return c.html(html);
+  }
+
+  // ── Code flow (unchanged) ──
+
   // Validate required params (matching original: BadRequest on missing)
   if (!code || !state) {
     return c.json<ErrorResponse>({ error: 'Missing code or state parameter' }, 400);
-  }
-
-  if (!SUPPORTED_PROVIDERS.has(provider)) {
-    return c.json<ErrorResponse>({ error: `Unsupported provider: ${provider}` }, 400);
   }
 
   // Retrieve session (matching original: _tokenStore.Retrieve(state))
@@ -113,18 +136,60 @@ oauthRoutes.get('/:provider/callback', async (c) => {
     await setTokens(c.env.DB, state, tokenResult.accessToken, tokenResult.refreshToken, tokenResult.expiresAt);
 
     // Get display name (matching original: provider.ToLowerInvariant() switch { ... })
-    const displayName = PROVIDER_DISPLAY_NAMES[provider] ?? provider;
+    const successDisplayName = PROVIDER_DISPLAY_NAMES[provider] ?? provider;
 
     // Render success HTML page with postMessage (matching original lines 80-106)
-    const html = renderCallbackHtml(displayName, provider, state);
+    const html = renderCallbackHtml(successDisplayName, provider, state);
     return c.html(html);
   } catch (err) {
     console.error(`OAuth callback failed for provider ${provider}:`, err);
     const errorMessage = err instanceof Error ? err.message : 'Token exchange failed';
-    const displayName = PROVIDER_DISPLAY_NAMES[provider] ?? provider;
-    const errorHtml = renderErrorHtml(displayName, errorMessage);
+    const errorDisplayName = PROVIDER_DISPLAY_NAMES[provider] ?? provider;
+    const errorHtml = renderErrorHtml(errorDisplayName, errorMessage);
     return c.html(errorHtml, 500);
   }
+});
+
+// ──────────────────────────────────────────────
+// POST /:provider/callback
+// Persists an access token captured from the implicit-flow redirect fragment.
+// Called by the capture page (renderImplicitCaptureHtml) served at the GET
+// callback. AniList implicit grant: client_id only, no exchange, NO refresh token.
+// ──────────────────────────────────────────────
+oauthRoutes.post('/:provider/callback', async (c) => {
+  const provider = c.req.param('provider').toLowerCase();
+
+  if (!SUPPORTED_PROVIDERS.has(provider)) {
+    return c.json<ErrorResponse>({ error: `Unsupported provider: ${provider}` }, 400);
+  }
+
+  // Only implicit-flow providers use this endpoint. Code-flow providers must
+  // go through the token exchange (GET callback / POST token), never this.
+  if (resolveProviderFlow(provider, c.env) !== 'implicit') {
+    return c.json<ErrorResponse>({ error: 'Implicit callback is only supported for implicit-flow providers' }, 400);
+  }
+
+  const body = await c.req.json<ImplicitTokenCallbackRequest>();
+
+  if (!body.state || !body.accessToken) {
+    return c.json<ErrorResponse>({ error: 'State and accessToken are required' }, 400);
+  }
+
+  // Validate the session exists for this state (prevents arbitrary token stuffing).
+  const session = await retrieve(c.env.DB, body.state);
+  if (!session) {
+    return c.json<ErrorResponse>({ error: 'Invalid state — authorization session not found' }, 400);
+  }
+
+  if (session.provider !== provider) {
+    return c.json<ErrorResponse>({ error: 'State does not match provider' }, 400);
+  }
+
+  // Store access token; NO refresh token exists in the implicit flow.
+  // expiresAt comes from the capture page (computed from expires_in).
+  await setTokens(c.env.DB, body.state, body.accessToken, null, body.expiresAt ?? null);
+
+  return c.json({ connected: true });
 });
 
 // ──────────────────────────────────────────────

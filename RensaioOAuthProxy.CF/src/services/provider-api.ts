@@ -1,4 +1,5 @@
 import type { Env, TokenResult } from '../types';
+import { resolveProviderFlow } from '../types';
 import { getCredentials } from '../utils/credentials';
 
 /**
@@ -11,6 +12,15 @@ import { getCredentials } from '../utils/credentials';
  *
  * Reads client_id + client_secret from env/secrets (via getCredentials).
  * Never stores them — only uses them for the token exchange.
+ *
+ * Providers can run one of two OAuth2 flows (see resolveProviderFlow):
+ *   - 'code' (Authorization Code Grant): client_id + client_secret, exchanges
+ *     the code at the token endpoint, receives access + refresh tokens.
+ *   - 'implicit' (Implicit Grant, e.g. AniList): client_id only, the access
+ *     token arrives directly in the redirect URL fragment. NO refresh token.
+ *     Because the fragment never reaches the server, the opaque `state` is
+ *     embedded in the redirect_uri query string so the capture page can
+ *     associate the token with the session the backend polls.
  *
  * PKCE support (MyAnimeList):
  *   MyAnimeList requires PKCE with S256 challenge method.
@@ -30,12 +40,23 @@ export function generateAuthUrl(
   codeChallenge?: string
 ): string {
   const { clientId } = getCredentials(provider, env);
-  const encodedRedirect = encodeURIComponent(redirectUri);
   const lower = provider.toLowerCase();
+  const flow = resolveProviderFlow(lower, env);
+
+  // AniList echoes `state` back verbatim — for the implicit grant it lands in
+  // the redirect URL FRAGMENT (#...&state=...), for the code grant it comes back
+  // as a query parameter. Either way the capture page / code path can resolve it.
+  const encodedRedirect = encodeURIComponent(redirectUri);
 
   switch (lower) {
-    case 'anilist':
-      return `https://anilist.co/api/v2/oauth/authorize?client_id=${clientId}&redirect_uri=${encodedRedirect}&response_type=code&state=${state}`;
+    case 'anilist': {
+      const responseType = flow === 'implicit' ? 'token' : 'code';
+      // NOTE: AniList derives the callback URI from the redirect URI registered
+      // on the application. Passing `redirect_uri` that does not match the
+      // registered value EXACTLY causes a grant error. Per AniList docs the
+      // parameter is optional — omit it so the registered callback is used.
+      return `https://anilist.co/api/v2/oauth/authorize?client_id=${clientId}&response_type=${responseType}&state=${state}`;
+    }
 
     case 'myanimelist': {
       // MyAnimeList requires PKCE (S256) per RFC 7636
@@ -88,11 +109,16 @@ export async function exchangeCode(
   env: Env,
   codeVerifier?: string
 ): Promise<TokenResult> {
+  // Implicit flow has no code exchange — the token was delivered directly in
+  // the redirect fragment and persisted via POST /:provider/callback.
+  if (resolveProviderFlow(provider, env) === 'implicit') {
+    throw new Error(`Provider ${provider} uses the implicit flow — no code exchange.`);
+  }
+
   const { clientId, clientSecret } = getCredentials(provider, env);
   const tokenUrl = getTokenUrl(provider);
 
   // Build form body with proper URL-encoding of each value
-  // Build form body using URLSearchParams for proper encoding
   const params = new URLSearchParams();
   params.append('grant_type', 'authorization_code');
   params.append('client_id', clientId);
@@ -143,6 +169,12 @@ export async function refreshToken(
   token: string,
   env: Env
 ): Promise<TokenResult> {
+  // Implicit flow issues NO refresh token — nothing to refresh. The client must
+  // re-authorize once the access token expires (e.g. AniList ~1 year TTL).
+  if (resolveProviderFlow(provider, env) === 'implicit') {
+    throw new Error(`Provider ${provider} uses the implicit flow — tokens cannot be refreshed.`);
+  }
+
   const { clientId, clientSecret } = getCredentials(provider, env);
   const tokenUrl = getTokenUrl(provider);
 

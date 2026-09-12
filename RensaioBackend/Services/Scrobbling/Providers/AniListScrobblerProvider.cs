@@ -5,6 +5,7 @@ using System.Text.Json;
 using RensaioBackend.Models.Dto;
 using RensaioBackend.Models.Enums;
 using RensaioBackend.Services.Scrobbling.Abstractions;
+using RensaioBackend.Utils;
 using Microsoft.Extensions.Logging;
 
 namespace RensaioBackend.Services.Scrobbling.Providers;
@@ -14,10 +15,45 @@ namespace RensaioBackend.Services.Scrobbling.Providers;
 /// OAuth authorization is handled by ProxyScrobblerProvider base class;
 /// search, read-state, and upload operations call the AniList GraphQL API directly.
 /// https://docs.anilist.co
+///
+/// DUAL-FLOW OAuth support (mirrors the OAuth proxy's flow selection):
+///   - Authorization Code Grant (UseImplicitFlow = false, default when a client
+///     secret is configured on the proxy): the proxy exchanges the code
+///     server-side, receives a refresh token, and silent renewal works.
+///   - Implicit Grant (UseImplicitFlow = true, default when NO client secret is
+///     configured): the access token is delivered in the redirect URL fragment
+///     and captured by the proxy's capture page. NO refresh token is issued →
+///     tokens expire and the user must re-authorize (~1 year TTL).
+///
+/// The flow the proxy actually runs is determined by its own configuration
+/// (PROXY_ANILIST_FLOW, or auto-detection from the presence of a client secret).
+/// This constant keeps the backend provider consistent with that selection so
+/// it never attempts a refresh the proxy cannot perform.
 /// </summary>
 public class AniListScrobblerProvider : ProxyScrobblerProvider
 {
     private const string GraphQlEndpoint = "https://graphql.anilist.co";
+
+    /// <summary>
+    /// Selects which OAuth2 flow AniList runs through the proxy.
+    ///
+    ///   false (default) → Authorization Code Grant — refresh tokens ARE issued
+    ///                      by the proxy; silent renewal is supported.
+    ///   true             → Implicit Grant — NO refresh token; token expires and
+    ///                      the user must re-authorize.
+    ///
+    /// IMPORTANT: Keep this in sync with the proxy's flow selection:
+    ///   - Proxy auto-detects 'code' when PROXY_ANILIST_CLIENT_SECRET is set,
+    ///     'implicit' otherwise; PROXY_ANILIST_FLOW overrides either way.
+    /// </summary>
+    private static readonly bool UseImplicitFlow = true;
+
+    /// <summary>
+    /// Implicit flow issues NO refresh token; code flow does. Mirror that in the
+    /// shared token-lifecycle logic so EnsureAuthenticatedAsync only attempts a
+    /// silent refresh when the flow actually supports it.
+    /// </summary>
+    public override bool SupportsTokenRefresh => !UseImplicitFlow;
 
     public AniListScrobblerProvider(
         IHttpClientFactory httpClientFactory,
@@ -25,20 +61,43 @@ public class AniListScrobblerProvider : ProxyScrobblerProvider
         IConfiguration configuration,
         ITokenStorageService tokenStorage,
         ScrobblerTokenProtector tokenProtector)
-        : base(httpClientFactory, configuration, ScrobblerProvider.AniList, logger, tokenStorage, tokenProtector)
+        : base(httpClientFactory, configuration, ExternalSeriesProvider.AniList, logger, tokenStorage, tokenProtector)
     {
         _apiHttpClient = httpClientFactory.CreateClient("Scrobbler_AniList");
     }
     private static ConcurrentDictionary<string, decimal> _dedupState = new();
     public override string? SeriesUrlTemplate => "https://anilist.co/manga/{0}";
 
+    /// <summary>
+    /// Flow-aware refresh handling:
+    ///   - Code flow: delegate to the base proxy client (uses the proxy's
+    ///     /refresh endpoint with the stored refresh token).
+    ///   - Implicit flow: fail gracefully — the proxy has no refresh token for
+    ///     this session and would reject the request.
+    /// </summary>
+    public override async Task<ScrobblerTokenResult> RefreshTokenAsync(string refreshToken)
+    {
+        if (UseImplicitFlow)
+        {
+            return new ScrobblerTokenResult
+            {
+                Success = false,
+                ErrorMessage = "AniList implicit flow does not issue refresh tokens — please re-authorize when the access token expires."
+            };
+        }
+
+        return await base.RefreshTokenAsync(refreshToken);
+    }
+
     public override async Task<List<ScrobblerSearchResult>> SearchSeriesAsync(string query, CancellationToken token = default)
     {
+        _logger.LogInformation("AniList: searching for '{Query}'", query);
         var graphQlQuery = @"
             query ($search: String) {
                 Page(page: 1, perPage: 25) {
                     media(search: $search, type: MANGA) {
                         id
+                        idMal
                         title { romaji english native }
                         synonyms
                         coverImage { large }
@@ -54,6 +113,7 @@ public class AniListScrobblerProvider : ProxyScrobblerProvider
             }";
 
         var requestBody = new { query = graphQlQuery, variables = new { search = query } };
+        _apiHttpClient.ApplyBearerToken(_accessToken);
         var response = await _apiHttpClient.PostAsJsonAsync(GraphQlEndpoint, requestBody, token);
         response.EnsureSuccessStatusCode();
 
@@ -64,21 +124,21 @@ public class AniListScrobblerProvider : ProxyScrobblerProvider
 
         foreach (var media in result.Data.Page.Media)
         {
-            var altTitles = new List<string>();
-            if (!string.IsNullOrEmpty(media.Title?.Romaji) && !string.Equals(media.Title.Romaji, media.Title.English, StringComparison.OrdinalIgnoreCase))
-                altTitles.Add(media.Title.Romaji);
-            if (!string.IsNullOrEmpty(media.Title?.English))
-                altTitles.Add(media.Title.English);
-            if (!string.IsNullOrEmpty(media.Title?.Native))
-                altTitles.Add(media.Title.Native);
+            var title = media.Title?.Romaji ?? media.Title?.English ?? query;
+            var titleCandidates = new List<string?> { media.Title?.Romaji, media.Title?.English, media.Title?.Native };
             if (media.Synonyms != null)
-                altTitles.AddRange(media.Synonyms);
+                titleCandidates.AddRange(media.Synonyms);
+
+            var linkedSites = new List<string> { $"anilist:{media.Id}" };
+            if (media.IdMal.HasValue)
+                linkedSites.Add($"myanimelist:{media.IdMal.Value}");
 
             results.Add(new ScrobblerSearchResult
             {
                 ExternalId = media.Id.ToString(),
-                Title = media.Title?.Romaji ?? media.Title?.English ?? query,
-                AlternateTitles = altTitles,
+                Title = title,
+                AlternateTitles = TitleListBuilder.BuildAlternates(title, titleCandidates),
+                LinkedSitesIds = linkedSites,
                 CoverUrl = media.CoverImage?.Large,
                 Type = media.Format,
                 ChapterCount = media.Chapters,
@@ -90,6 +150,75 @@ public class AniListScrobblerProvider : ProxyScrobblerProvider
         }
 
         return results;
+    }
+
+    /// <summary>
+    /// Fetches full AniList metadata for a media ID (GraphQL Media query), preserving the
+    /// provider-native payload in <see cref="SeriesMetadataResult.MetaData"/>.
+    /// </summary>
+    public override async Task<SeriesMetadataResult?> FetchSeriesMetadataAsync(string externalSeriesId, CancellationToken token = default)
+    {
+        base._logger.LogInformation("AniList: fetching metadata for id '{Id}'", externalSeriesId);
+        if (string.IsNullOrWhiteSpace(externalSeriesId)) return null;
+        try
+        {
+            var query = @"
+                query ($id: Int) {
+                    Media(id: $id, type: MANGA) {
+                        id
+                        idMal
+                        title { romaji english native }
+                        synonyms
+                        coverImage { large extraLarge }
+                        format
+                        status
+                        chapters
+                        volumes
+                        description
+                        averageScore
+                        startDate { year month day }
+                        endDate { year month day }
+                        genres
+                        tags { name }
+                        externalLinks { site url id }
+                    }
+                }";
+
+            var requestBody = new
+            {
+                query,
+                variables = new { id = int.Parse(externalSeriesId) }
+            };
+
+            _apiHttpClient.ApplyBearerToken(_accessToken);
+            var response = await _apiHttpClient.PostAsJsonAsync(GraphQlEndpoint, requestBody, token);
+            if (!response.IsSuccessStatusCode) return null;
+
+            var result = await response.Content.ReadFromJsonAsync<AniListMediaDetailResponse>(cancellationToken: token);
+            var media = result?.Data?.Media;
+            if (media == null) return null;
+
+            var title = media.Title?.Romaji ?? media.Title?.English ?? externalSeriesId;
+            var titleCandidates = new List<string?> { media.Title?.Romaji, media.Title?.English, media.Title?.Native };
+            if (media.Synonyms != null) titleCandidates.AddRange(media.Synonyms);
+
+            var linkedSites = new List<string> { $"anilist:{media.Id}" };
+            if (media.IdMal.HasValue) linkedSites.Add($"myanimelist:{media.IdMal.Value}");
+
+            return new SeriesMetadataResult
+            {
+                ExternalId = media.Id.ToString(),
+                Title = title,
+                MetaData = System.Text.Json.JsonSerializer.Serialize(media),
+                LinkedSitesIds = linkedSites,
+                AlternativeTitles = TitleListBuilder.BuildAlternates(title, titleCandidates),
+                CoverUrl = media.CoverImage?.ExtraLarge ?? media.CoverImage?.Large
+            };
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     public override async Task<Dictionary<decimal, float>> GetReadChaptersAsync(string externalSeriesId, CancellationToken token = default)
@@ -239,6 +368,7 @@ public class AniListScrobblerProvider : ProxyScrobblerProvider
     private class AniListMedia
     {
         public int Id { get; set; }
+        public int? IdMal { get; set; }
         public AniListTitle? Title { get; set; }
         public List<string>? Synonyms { get; set; }
         public AniListCoverImage? CoverImage { get; set; }
@@ -249,6 +379,32 @@ public class AniListScrobblerProvider : ProxyScrobblerProvider
         public string? Description { get; set; }
         public int? AverageScore { get; set; }
         public AniListStartDate? StartDate { get; set; }
+        public AniListStartDate? EndDate { get; set; }
+        public List<string>? Genres { get; set; }
+        public List<AniListTag>? Tags { get; set; }
+        public List<AniListExternalLink>? ExternalLinks { get; set; }
+    }
+
+    private class AniListTag
+    {
+        public string? Name { get; set; }
+    }
+
+    private class AniListExternalLink
+    {
+        public string? Site { get; set; }
+        public string? Url { get; set; }
+        public int? Id { get; set; }
+    }
+
+    private class AniListMediaDetailResponse
+    {
+        public AniListMediaDetailData? Data { get; set; }
+    }
+
+    private class AniListMediaDetailData
+    {
+        public AniListMedia? Media { get; set; }
     }
 
     private class AniListTitle
@@ -261,6 +417,7 @@ public class AniListScrobblerProvider : ProxyScrobblerProvider
     private class AniListCoverImage
     {
         public string? Large { get; set; }
+        public string? ExtraLarge { get; set; }
     }
 
     private class AniListStartDate

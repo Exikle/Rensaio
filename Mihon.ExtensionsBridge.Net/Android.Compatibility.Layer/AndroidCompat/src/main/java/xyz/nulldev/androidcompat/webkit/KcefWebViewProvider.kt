@@ -253,6 +253,15 @@ class KcefWebViewProvider(
                     "--disable-dev-shm-usage",
                     "--change-stack-guard-on-fork=disable",
                     "--max-render-processes=$maxRenderers",
+                    // Headless/OSR only: never touch real GPU or the Dawn/WebGPU D3D12 backend.
+                    // Without these, newer Chromium (JCEF 146+) eagerly initializes Dawn and tries
+                    // to load dxil.dll (DXC shader compiler), which fails on a headless box with
+                    // "DynamicLib.Open: dxil.dll Windows Error: 87".
+                    // We keep the GPU process out-of-process (no --in-process-gpu) so the external
+                    // Avalonia pump driving CEF on the UI thread is not perturbed by GPU threading.
+                    "--disable-webgpu",
+                    "--disable-dawn-features=use_dxc,allow_unsafe_apis",
+                    "--disable-features=DawnTogglesMetal,WebGPU,WebGPUService,SharedArrayBuffer",
                 )
 
                 // Register a state observer so CEF state transitions (notably

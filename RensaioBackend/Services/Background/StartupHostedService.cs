@@ -4,12 +4,14 @@ using RensaioBackend.Migration;
 using RensaioBackend.Models.Database;
 using RensaioBackend.Models.Dto;
 using RensaioBackend.Models.Enums;
+using RensaioBackend.Services.Scrobbling;
 using RensaioBackend.Services.Bridge;
 using RensaioBackend.Services.Helpers;
 using RensaioBackend.Services.Jobs;
 using RensaioBackend.Services.Providers;
 using RensaioBackend.Services.ReadState;
 using RensaioBackend.Services.Settings;
+using RensaioBackend.Utils;
 using Microsoft.EntityFrameworkCore;
 using Mihon.ExtensionsBridge.Core.Utilities;
 using Mihon.ExtensionsBridge.Models.Abstractions;
@@ -22,11 +24,12 @@ namespace RensaioBackend.Services.Background
         private readonly NouisanceFixer20ExtraLarge _fixes;
         private readonly ILogger<StartupHostedService> _logger;
         private readonly IServiceScopeFactory _scopeFactory;
+        private readonly IConfiguration _config;
         private readonly List<Task> _workerTasks = new();
         private CancellationTokenSource? _workerCts;
         private bool _disposed = false;
 
-        public StartupHostedService(ILogger<StartupHostedService> logger, 
+        public StartupHostedService(ILogger<StartupHostedService> logger,
             IServiceScopeFactory scopeFactory,
             NouisanceFixer20ExtraLarge fixes,
             IConfiguration config)
@@ -34,6 +37,7 @@ namespace RensaioBackend.Services.Background
             _logger = logger;
             _scopeFactory = scopeFactory;
             _fixes = fixes;
+            _config = config;
         }
 
         public void Dispose()
@@ -84,6 +88,64 @@ namespace RensaioBackend.Services.Background
         }
 
 
+        /// <summary>
+        /// Ensures the local contributor database (contributor.db) exists and is
+        /// migrated. On a fresh database, the schema is created via
+        /// <c>EnsureCreatedAsync</c> and all known migrations are marked as applied so a
+        /// later <c>MigrateAsync</c> no-ops (same bootstrap pattern as the main app DB).
+        /// On an existing database, <c>MigrateAsync</c> applies any pending migrations.
+        /// WAL journal mode is enabled in both cases.
+        /// </summary>
+        private static async Task EnsureContributionDbAsync(IConfiguration configuration, CancellationToken cancellationToken)
+        {
+            var dbPath = EnvironmentSetup.ContributorDatabasePath(configuration);
+
+            // Snapshot existence BEFORE opening the connection: executing any statement
+            // (including the WAL pragma below) makes SQLite create the file, which would
+            // otherwise force a fresh database down the MigrateAsync path instead of the
+            // model-driven EnsureCreated path.
+            var exists = File.Exists(dbPath);
+
+            var options = new DbContextOptionsBuilder<ContributionDbContext>()
+                .UseSqlite($"Data Source={dbPath}")
+                .UseQueryTrackingBehavior(QueryTrackingBehavior.TrackAll)
+                .Options;
+            await using var db = new ContributionDbContext(options);
+            await db.Database.ExecuteSqlRawAsync("PRAGMA journal_mode=WAL;", cancellationToken).ConfigureAwait(false);
+
+            if (!exists)
+            {
+                await db.Database.EnsureCreatedAsync(cancellationToken).ConfigureAwait(false);
+                await MarkContributionMigrationsAppliedAsync(db, cancellationToken).ConfigureAwait(false);
+            }
+            else
+            {
+                await db.Database.MigrateAsync(cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        /// <summary>
+        /// Creates the EF migrations history table for the contributor database and
+        /// records all known migrations as already applied (used after a fresh
+        /// EnsureCreated so MigrateAsync won't try to re-create the schema).
+        /// </summary>
+        private static async Task MarkContributionMigrationsAppliedAsync(ContributionDbContext db, CancellationToken cancellationToken)
+        {
+            await db.Database.ExecuteSqlRawAsync(
+                "CREATE TABLE IF NOT EXISTS \"__EFMigrationsHistory\" (\"MigrationId\" TEXT NOT NULL PRIMARY KEY, \"ProductVersion\" TEXT NOT NULL);",
+                cancellationToken).ConfigureAwait(false);
+
+            var efCoreVersion = typeof(DbContext).Assembly.GetName().Version?.ToString() ?? "0.0.0";
+            var allMigrations = db.Database.GetMigrations();
+            foreach (var migrationId in allMigrations)
+            {
+                await db.Database.ExecuteSqlRawAsync(
+                    "INSERT OR IGNORE INTO \"__EFMigrationsHistory\" (\"MigrationId\", \"ProductVersion\") VALUES ({0}, {1});",
+                    new object[] { migrationId, efCoreVersion },
+                    cancellationToken).ConfigureAwait(false);
+            }
+        }
+
         public async Task StartAsync(CancellationToken cancellationToken)
         {
             try
@@ -117,7 +179,23 @@ namespace RensaioBackend.Services.Background
                 await settingsService.SetTimesSettingsAsync(settings, cancellationToken).ConfigureAwait(false);
                 AppDbContext db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
                 await db.Database.MigrateAsync(cancellationToken).ConfigureAwait(false);
+                await BackfillMappingStatusAsync(db, cancellationToken).ConfigureAwait(false);
                 await db.Database.ExecuteSqlRawAsync("PRAGMA journal_mode=WAL;", cancellationToken).ConfigureAwait(false);
+
+                // Ensure the local contributor database exists and is migrated.
+                // Path is derived from DefaultConnection (sibling contributor.db).
+                await EnsureContributionDbAsync(_config, cancellationToken).ConfigureAwait(false);
+
+                // (Re)hydrate the in-memory global metadata repository from app-carried mappings.
+                try
+                {
+                    var repo = scope.ServiceProvider.GetRequiredService<Contributions.InMemoryGlobalMetadataRepository>();
+                    await repo.RefreshAsync(cancellationToken).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to initialize the global metadata repository");
+                }
                 //await db.Database.ExecuteSqlRawAsync("PRAGMA busy_timeout=5000;", cancellationToken).ConfigureAwait(false);
                 await _fixes.FixThumbnailsOfSeriesWithMissingThumbnailsAsync(cancellationToken).ConfigureAwait(false);
 
@@ -173,11 +251,41 @@ namespace RensaioBackend.Services.Background
                 var workerToken = _workerCts.Token;
                 _workerTasks.Add(StartWorker<JobQueueHostedService>(workerToken));
                 _workerTasks.Add(StartWorker<JobScheduledHostedService>(workerToken));
+                _workerTasks.Add(StartWorker<MetadataBackgroundScanService>(workerToken));
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error starting Startup Hosted Service");
                 throw;
+            }
+        }
+
+        private async Task BackfillMappingStatusAsync(AppDbContext db, CancellationToken cancellationToken)
+        {
+            try
+            {
+                // 1. Global rows: backfill the new shared enum defaults.
+                var globalMappings = await db.SeriesMappings
+                    .Where(m => m.MappingStatus == null || m.LinkedDate == null)
+                    .ToListAsync(cancellationToken).ConfigureAwait(false);
+                foreach (var m in globalMappings)
+                {
+                    if (m.MappingStatus == null)
+                        m.MappingStatus = SeriesMappingStatus.AutoMatched;
+                    if (m.LinkedDate == null)
+                        m.LinkedDate = m.UpdateDate;
+                }
+                if (globalMappings.Count > 0)
+                {
+                    await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+                    _logger.LogInformation("Backfilled {Count} global series mappings status", globalMappings.Count);
+                }
+
+                // Note: the per-user UserSeriesMappings table has been dropped (global-only mappings).
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to backfill mapping status during startup");
             }
         }
 

@@ -92,9 +92,29 @@ namespace RensaioBackend.Services.Images
                 _urlLock.Release();
             }
         }
+        /// <summary>
+        /// Returns true when the URL is not yet cache-rewritten and can be resolved through
+        /// the image cache (i.e. it is not already pointing at /api/image/ and is not a
+        /// data: URI). Internal schemes (ext://, storage://) are still eligible because they
+        /// are served by the cache providers too.
+        /// </summary>
+        private static bool IsEligibleForRewrite(string? url)
+        {
+            if (string.IsNullOrEmpty(url))
+                return false;
+            if (url.StartsWith("/api/image/", StringComparison.OrdinalIgnoreCase))
+                return false; // Already rewritten — never double-prefix.
+            if (url.StartsWith("data:", StringComparison.OrdinalIgnoreCase))
+                return false; // Inline data URI (e.g. provider placeholder icons) — keep verbatim.
+            return true;
+        }
+
         public async ValueTask PopulateThumbsAsync(IThumb thumb, string prefix = "/api/image/", CancellationToken token = default)
         {
-            thumb.ThumbnailUrl = prefix + await GetKeyAsync(thumb.ThumbnailUrl, token).ConfigureAwait(false);
+            if (thumb == null || !IsEligibleForRewrite(thumb.ThumbnailUrl))
+                return;
+            string url = thumb.ThumbnailUrl ?? string.Empty;
+            thumb.ThumbnailUrl = prefix + await GetKeyAsync(url, token).ConfigureAwait(false);
         }
         public async ValueTask PopulateThumbsAsync(IEnumerable<IThumb> thumbs, string prefix = "/api/image/", CancellationToken token = default)
         {
@@ -106,7 +126,7 @@ namespace RensaioBackend.Services.Images
                 foreach(IThumb t in thumbs.ToList())
                 {
                     string? url = t?.ThumbnailUrl;
-                    if (t==null || string.IsNullOrEmpty(url))
+                    if (t==null || !IsEligibleForRewrite(url))
                     {
                         all.Remove(t);
                         continue;
@@ -258,6 +278,7 @@ namespace RensaioBackend.Services.Images
             DateTime now = DateTime.UtcNow;
             List<EtagCacheEntity> caches = await _db.ETagCache.Where(a=>a.NextUpdateUTC<now).ToListAsync(token).ConfigureAwait(false);
             var httpClient = _factory.CreateClient(nameof(ThumbCacheService));
+            
             foreach (EtagCacheEntity cache in caches)
             {
                 IImageProvider? provider = GetProviderForUrl(cache.Url);

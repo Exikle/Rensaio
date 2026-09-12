@@ -37,7 +37,7 @@ public class ImportSeriesResult
 
     /// <summary>
     /// Cached external mappings from SeriesMappings table.
-    /// Maps ScrobblerProvider enum name (e.g., "MyAnimeList") to ExternalSeriesId.
+    /// Maps ExternalSeriesProvider enum name (e.g., "MyAnimeList") to ExternalSeriesId.
     /// Serialized into rensaio.json for offline/cached automatch fallback.
     /// </summary>
     public List<ExternalMapping>? ExternalMappings { get; set; }

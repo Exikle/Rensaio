@@ -25,6 +25,13 @@ interface ScrobblerSearchRequesterProps {
   seriesTitle: string;
   seriesThumbnail?: string;
   seriesAltTitles?: string;
+  /**
+   * Optional confirm callback. When provided it replaces the default Rensaio series-scoped
+   * confirm (`useConfirmMatch`), letting other pages (e.g. Contribution Mappings) confirm into
+   * their own persistence layer while reusing the exact same search dialog UI.
+   */
+  onConfirm?: (externalSeriesId: string, externalSeriesTitle?: string) => Promise<void> | void;
+  confirmLabel?: string;
 }
 
 export function ScrobblerSearchRequester({
@@ -35,6 +42,8 @@ export function ScrobblerSearchRequester({
   seriesTitle,
   seriesThumbnail,
   seriesAltTitles,
+  onConfirm,
+  confirmLabel = 'Confirm Selection',
 }: ScrobblerSearchRequesterProps) {
   const searchExternal = useSearchExternal();
   const confirmMatch = useConfirmMatch();
@@ -46,6 +55,7 @@ export function ScrobblerSearchRequester({
   const [isSearching, setIsSearching] = useState(false);
   const [hasSearched, setHasSearched] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [isConfirming, setIsConfirming] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
 
   const handleSearch = useCallback(async () => {
@@ -63,16 +73,28 @@ export function ScrobblerSearchRequester({
   }, [searchQuery, provider, searchExternal]);
 
   const handleConfirm = useCallback(async () => {
-    if (!selectedId) return;
-    const selected = searchResults.find(r => r.externalId === selectedId);
-    await confirmMatch.mutateAsync({
-      seriesId,
-      provider,
-      externalSeriesId: selectedId,
-      externalSeriesTitle: selected?.title,
-    });
-    onOpenChange(false);
-  }, [selectedId, searchResults, seriesId, provider, confirmMatch, onOpenChange]);
+    if (selectedId == null) return;
+    const index = parseInt(selectedId, 10);
+    const selected = searchResults[index];
+    if (!selected) return;
+
+    setIsConfirming(true);
+    try {
+      if (onConfirm) {
+        await onConfirm(selected.externalId, selected.title);
+      } else {
+        await confirmMatch.mutateAsync({
+          seriesId,
+          provider,
+          externalSeriesId: selected.externalId,
+          externalSeriesTitle: selected.title,
+        });
+      }
+      onOpenChange(false);
+    } finally {
+      setIsConfirming(false);
+    }
+  }, [selectedId, searchResults, seriesId, provider, confirmMatch, onConfirm, onOpenChange]);
 
   // Reset state when dialog opens and prefill search with series title
   const hasAutoSearched = useRef(false);
@@ -180,21 +202,24 @@ export function ScrobblerSearchRequester({
           {searchResults.length > 0 && (
             <div className="flex-1 overflow-y-auto" style={{ scrollbarGutter: 'stable' }}>
               <div className="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-5 gap-2 p-0.5">
-                {searchResults.map((result) => {
+                {searchResults.map((result, idx) => {
                   const coverUrl = getCoverUrl(result);
                   const altLines = result.alternateTitles?.length
                     ? result.alternateTitles.join('\n')
                     : '';
+                  // Use the row index as identity: externalId may be empty/duplicated across
+                  // providers (MangaBaka/MangaUpdates), which caused all rows to highlight together.
+                  const rowKey = `${idx}`;
                   return (
                     <div
-                      key={result.externalId}
+                      key={rowKey}
                       className={`cursor-pointer rounded-lg border transition-all duration-200 hover:shadow-md ${
-                        selectedId === result.externalId
+                        selectedId === rowKey
                           ? 'ring-2 ring-primary shadow-md'
                           : 'hover:ring-1 hover:ring-gray-300'
                       }`}
                       onClick={() => setSelectedId(
-                        selectedId === result.externalId ? null : result.externalId
+                        selectedId === rowKey ? null : rowKey
                       )}
                     >
                       {coverUrl ? (
@@ -228,7 +253,7 @@ export function ScrobblerSearchRequester({
                       <Tooltip>
                         <TooltipTrigger asChild>
                           <div className={`p-1.5 text-center ${
-                            selectedId === result.externalId
+                            selectedId === rowKey
                               ? 'bg-primary text-primary-foreground'
                               : 'bg-card'
                           }`}>
@@ -239,7 +264,9 @@ export function ScrobblerSearchRequester({
                                 : '\u00A0'}
                             </p>
                             {result.type && (
-                              <p className="text-[10px] text-muted-foreground mt-0.5">{result.type}</p>
+                              <p className="text-[10px] text-muted-foreground mt-0.5">
+                                {result.year ? `${result.type} (${result.year})` : result.type}
+                              </p>
                             )}
                           </div>
                         </TooltipTrigger>
@@ -286,10 +313,10 @@ export function ScrobblerSearchRequester({
             </Button>
             <Button
               onClick={handleConfirm}
-              disabled={!selectedId || confirmMatch.isPending}
+              disabled={!selectedId || confirmMatch.isPending || isConfirming}
             >
               <Check className="h-4 w-4 mr-1" />
-              {confirmMatch.isPending ? 'Confirming...' : 'Confirm Selection'}
+              {confirmMatch.isPending || isConfirming ? 'Confirming...' : confirmLabel}
             </Button>
           </DialogFooter>
         </DialogContent>

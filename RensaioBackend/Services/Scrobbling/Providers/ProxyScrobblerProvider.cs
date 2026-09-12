@@ -12,6 +12,14 @@ namespace RensaioBackend.Services.Scrobbling.Providers;
 /// Abstract base class for scrobbler providers that use the central OAuth proxy
 /// for authorization (token exchange/refresh) but call provider APIs directly
 /// for search, read-state, and tracking operations.
+///
+/// OAuth flow nuance:
+///   - 'code' grant providers (MyAnimeList, and AniList when a client secret is
+///     configured) receive a refresh token and use RefreshTokenAsync.
+///   - 'implicit' grant providers (AniList public client, no client secret) do
+///     NOT receive a refresh token. Override <see cref="SupportsTokenRefresh"/>
+///     to return false so EnsureAuthenticatedAsync skips the refresh branch —
+///     the user simply re-authorizes when the access token expires.
 /// </summary>
 public abstract class ProxyScrobblerProvider : IScrobblerProvider
 {
@@ -26,7 +34,8 @@ public abstract class ProxyScrobblerProvider : IScrobblerProvider
     protected readonly ITokenStorageService _tokenStorage;
     protected readonly ScrobblerTokenProtector _tokenProtector;
 
-    public ScrobblerProvider ProviderType { get; }
+    public ExternalSeriesProvider ProviderType { get; }
+    public virtual ProviderFeatures Features => ProviderFeatures.Scrobbling | ProviderFeatures.Metadata;
     public string DisplayName { get; }
     public string? Icon { get; }
     public string? Link => null;
@@ -35,6 +44,19 @@ public abstract class ProxyScrobblerProvider : IScrobblerProvider
     public virtual string? ImageTemplateUrl => null;
     public bool RequiresOAuth => true;
     public bool SupportsDirectAuth => false;
+
+    /// <summary>
+    /// Whether this provider's OAuth flow issues a refresh token that can be
+    /// used to silently renew an expired access token.
+    ///
+    /// Default: true (Authorization Code Grant — MyAnimeList, Kitsu, MangaDex,
+    /// and AniList with a configured client secret).
+    ///
+    /// Implicit-grant providers (AniList public client) have NO refresh token.
+    /// Override to false; EnsureAuthenticatedAsync will then leave the stored
+    /// access token untouched when it expires instead of attempting a refresh.
+    /// </summary>
+    public virtual bool SupportsTokenRefresh => true;
 
     public Task<ScrobblerTokenResult> AuthenticateDirectAsync(DirectAuthRequest request)
         => throw new NotSupportedException("Proxy providers do not support direct authentication.");
@@ -48,7 +70,7 @@ public abstract class ProxyScrobblerProvider : IScrobblerProvider
     protected ProxyScrobblerProvider(
         IHttpClientFactory httpClientFactory,
         IConfiguration configuration,
-        ScrobblerProvider providerType,
+        ExternalSeriesProvider providerType,
         ILogger logger,
         ITokenStorageService tokenStorage,
         ScrobblerTokenProtector tokenProtector)
@@ -67,26 +89,26 @@ public abstract class ProxyScrobblerProvider : IScrobblerProvider
         ProviderType = providerType;
         DisplayName = providerType switch
         {
-            ScrobblerProvider.AniList => "AniList",
-            ScrobblerProvider.MyAnimeList => "MyAnimeList",
-            ScrobblerProvider.Kitsu => "Kitsu",
-            ScrobblerProvider.MangaDex => "MangaDex",
+            ExternalSeriesProvider.AniList => "AniList",
+            ExternalSeriesProvider.MyAnimeList => "MyAnimeList",
+            ExternalSeriesProvider.Kitsu => "Kitsu",
+            ExternalSeriesProvider.MangaDex => "MangaDex",
             _ => providerType.ToString()
         };
         Icon = providerType switch
         {
-            ScrobblerProvider.MyAnimeList => ProviderIcons.MyAnimeList,
-            ScrobblerProvider.AniList => ProviderIcons.AniList,
-            ScrobblerProvider.Kitsu => ProviderIcons.Kitsu,
-            ScrobblerProvider.MangaDex => ProviderIcons.MangaDex,
+            ExternalSeriesProvider.MyAnimeList => ProviderIcons.MyAnimeList,
+            ExternalSeriesProvider.AniList => ProviderIcons.AniList,
+            ExternalSeriesProvider.Kitsu => ProviderIcons.Kitsu,
+            ExternalSeriesProvider.MangaDex => ProviderIcons.MangaDex,
             _ => ProviderIcons.Placeholder
         };
         _providerName = providerType switch
         {
-            ScrobblerProvider.AniList => "anilist",
-            ScrobblerProvider.MyAnimeList => "myanimelist",
-            ScrobblerProvider.Kitsu => "kitsu",
-            ScrobblerProvider.MangaDex => "mangadex",
+            ExternalSeriesProvider.AniList => "anilist",
+            ExternalSeriesProvider.MyAnimeList => "myanimelist",
+            ExternalSeriesProvider.Kitsu => "kitsu",
+            ExternalSeriesProvider.MangaDex => "mangadex",
             _ => providerType.ToString().ToLowerInvariant()
         };
     }
@@ -144,8 +166,10 @@ public abstract class ProxyScrobblerProvider : IScrobblerProvider
         };
     }
 
-    public async Task<ScrobblerTokenResult> RefreshTokenAsync(string refreshToken)
+    public virtual async Task<ScrobblerTokenResult> RefreshTokenAsync(string refreshToken)
     {
+        // Implicit-grant providers (no refresh token) override this to return a
+        // graceful failure instead of calling the proxy's /refresh endpoint.
         var request = new { refreshToken };
 
         _proxyHttpClient.DefaultRequestHeaders.Remove("X-Instance-Key");
@@ -175,6 +199,13 @@ public abstract class ProxyScrobblerProvider : IScrobblerProvider
     }
     public string GetUserExternalKey(string externalSeriesId) => $"{_userId}:{externalSeriesId}";
 
+    /// <summary>
+    /// Metadata detail fetch. Subclasses that support <see cref="ProviderFeatures.Metadata"/>
+    /// override this to return provider-native detail JSON.
+    /// </summary>
+    public virtual Task<SeriesMetadataResult?> FetchSeriesMetadataAsync(string externalSeriesId, CancellationToken token = default)
+        => Task.FromResult<SeriesMetadataResult?>(null);
+
     public Task<bool> ValidateApiKeyAsync(string apiKey) => Task.FromResult(false);
 
     public async Task<bool> ValidateTokenAsync(CancellationToken token = default)
@@ -203,6 +234,11 @@ public abstract class ProxyScrobblerProvider : IScrobblerProvider
 
         SetAccessToken(accessToken, userId);
 
+        // Implicit-grant providers (e.g. AniList without a client secret) receive
+        // NO refresh token from the OAuth flow. There is nothing to silently
+        // refresh — the user re-authorizes when the access token expires.
+        if (!SupportsTokenRefresh) return;
+
         if (expiresAt.HasValue && expiresAt.Value < DateTime.UtcNow.AddMinutes(5))
         {
             if (string.IsNullOrEmpty(refreshToken)) return;
@@ -227,7 +263,12 @@ public abstract class ProxyScrobblerProvider : IScrobblerProvider
     public abstract Task<List<ScrobblerSearchResult>> SearchSeriesAsync(string query, CancellationToken token = default);
     public abstract Task<Dictionary<decimal, float>> GetReadChaptersAsync(string externalSeriesId, CancellationToken token = default);
     public abstract Task<bool> SetReadChaptersAsync(string externalSeriesId, Dictionary<decimal, float> chapterState, CancellationToken token = default);
-        
+
+    public virtual List<string> FilterLookupTitles(IEnumerable<string> titles)
+    {
+        return titles.ToList();
+    }
+
     // ── JSON Models ──
 
     private class ProxyAuthUrlResponse

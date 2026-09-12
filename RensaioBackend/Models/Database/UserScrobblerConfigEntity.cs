@@ -16,7 +16,7 @@ public class UserScrobblerConfigEntity
     public Guid UserId { get; set; }
 
     [Required]
-    public ScrobblerProvider Provider { get; set; }
+    public ExternalSeriesProvider Provider { get; set; }
 
     public string? AccessToken { get; set; }
     public string? RefreshToken { get; set; }

@@ -37,7 +37,6 @@
     }
   },
   "include": [
-    ".eslintrc.cjs",
     "next-env.d.ts",
     "**/*.ts",
     "**/*.tsx",
@@ -51,6 +50,7 @@
   ],
   "exclude": [
     "node_modules",
+    ".eslintrc.cjs",
     "out/**/*",
     ".next/static/**/*",
     ".next/server/**/*",

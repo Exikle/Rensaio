@@ -1,10 +1,9 @@
 /**
- * Derive AES-256-CBC key and IV from the concatenated base64 secret.
+ * AES-256-CBC crypto helpers for the export pipeline.
  *
- * The `aeskey256iv` secret is: base64(32-byte-key + 16-byte-iv)
- * = 64 base64 characters.
- *
- * In Workers runtime, Web Crypto is available via `crypto.subtle`.
+ * The `AESKEY256IV` secret is: base64(32-byte key + 16-byte IV) = 64 base64 chars.
+ * The exported `metadata.bin` payload is the tagged+compressed protobuf stream
+ * encrypted with these helpers (one-shot AES-CBC per the approved pure-JS design).
  */
 import { toUint8Array, type BlobValue } from './binary';
 
@@ -38,52 +37,62 @@ export function parseAesKeyIv(encoded: string): { keyBytes: ArrayBuffer; iv: Uin
 }
 
 /**
- * Import the AES key for Web Crypto operations.
+ * Import the AES key for Web Crypto operations (encrypt + decrypt).
  */
-async function importAesKey(keyBytes: ArrayBuffer): Promise<CryptoKey> {
+async function importAesKey(
+  keyBytes: ArrayBuffer,
+  usages: Array<'encrypt' | 'decrypt'> = ['encrypt']
+): Promise<CryptoKey> {
   return crypto.subtle.importKey(
     'raw',
     keyBytes,
     { name: 'AES-CBC' },
-    false,           // not extractable
-    ['encrypt']      // only encryption needed
+    false,               // not extractable
+    usages
   );
 }
 
 /**
- * Transform raw binary data for export:
- *   BLOB → AES-256-CBC encrypt → base64
- *
- * Returns the final base64 string ready for sources.json.
+ * AES-256-CBC encrypt raw bytes. Returns the ciphertext (same length,
+ * CBC does not add padding in Web Crypto).
  */
-export async function encryptSourceData(
-  rawData: BlobValue,
-  aeskey256iv: string
-): Promise<string> {
+export async function encryptBytes(rawBytes: Uint8Array, aeskey256iv: string): Promise<Uint8Array> {
   const { keyBytes, iv } = parseAesKeyIv(aeskey256iv);
-  const key = await importAesKey(keyBytes);
+  const key = await importAesKey(keyBytes, ['encrypt']);
+  const encrypted = await crypto.subtle.encrypt({ name: 'AES-CBC', iv }, key, rawBytes);
+  return new Uint8Array(encrypted);
+}
 
-  // D1 returns BLOBs differently across engines: ArrayBuffer (local
-  // Miniflare), Uint8Array, or a base64 string (live D1 HTTP). Normalize
-  // before passing to Web Crypto, which strictly requires a JsBufferSource.
+/**
+ * AES-256-CBC decrypt raw bytes. Returns the plaintext.
+ */
+export async function decryptBytes(cipherBytes: Uint8Array, aeskey256iv: string): Promise<Uint8Array> {
+  const { keyBytes, iv } = parseAesKeyIv(aeskey256iv);
+  const key = await importAesKey(keyBytes, ['decrypt']);
+  const decrypted = await crypto.subtle.decrypt({ name: 'AES-CBC', iv }, key, cipherBytes);
+  return new Uint8Array(decrypted);
+}
+
+/**
+ * Transform raw binary data for the export payload:
+ *   BLOB → AES-256-CBC encrypt → Uint8Array
+ */
+export async function encryptBlob(rawData: BlobValue, aeskey256iv: string): Promise<Uint8Array> {
   const bytes = toUint8Array(rawData);
   if (bytes === null) {
     throw new Error('Cannot encrypt empty source data');
   }
+  return encryptBytes(bytes, aeskey256iv);
+}
 
-  // AES-256-CBC encrypt
-  const encrypted = await crypto.subtle.encrypt(
-    { name: 'AES-CBC', iv },
-    key,
-    bytes
-  );
-
-  // base64 encode
-  const encryptedBytes = new Uint8Array(encrypted);
+/**
+ * Base64-encode a Uint8Array (UTF-8 safe chunked btoa).
+ */
+export function bytesToBase64(bytes: Uint8Array): string {
   let binary = '';
-  const chunkSize = 0x8000;
-  for (let i = 0; i < encryptedBytes.length; i += chunkSize) {
-    binary += String.fromCharCode(...encryptedBytes.subarray(i, i + chunkSize));
+  const chunkSize = 0x8000; // 32KB chunks to avoid call-stack limits
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
   }
   return btoa(binary);
 }

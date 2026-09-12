@@ -1,8 +1,9 @@
-using com.sun.security.ntlm;
 using RensaioBackend.Data;
 using RensaioBackend.Models.Dto;
 using RensaioBackend.Models.Enums;
+using RensaioBackend.Services.Metadata;
 using RensaioBackend.Services.Scrobbling.Abstractions;
+using RensaioBackend.Utils;
 using Microsoft.Extensions.Logging;
 using System.Collections.Concurrent;
 using System.Net.Http.Headers;
@@ -29,7 +30,8 @@ public class KitsuScrobblerProvider : IScrobblerProvider
     private const string AuthBase = "https://kitsu.io/api/oauth";
     private const string ApiBase = "https://kitsu.io/api/edge";
 
-    public ScrobblerProvider ProviderType => ScrobblerProvider.Kitsu;
+    public ExternalSeriesProvider ProviderType => ExternalSeriesProvider.Kitsu;
+    public ProviderFeatures Features => ProviderFeatures.Scrobbling | ProviderFeatures.Metadata;
     public string DisplayName => "Kitsu";
     public string? Icon => ProviderIcons.Kitsu;
     public string? Link => null;
@@ -39,16 +41,20 @@ public class KitsuScrobblerProvider : IScrobblerProvider
     public bool RequiresOAuth => true;
     public bool SupportsDirectAuth => true;
 
+    private readonly SeriesMetadataResolver _resolver;
+
     public KitsuScrobblerProvider(
         IHttpClientFactory httpClientFactory,
         ILogger<KitsuScrobblerProvider> logger,
         ITokenStorageService tokenStorage,
-        ScrobblerTokenProtector tokenProtector)
+        ScrobblerTokenProtector tokenProtector,
+        SeriesMetadataResolver resolver)
     {
         _httpClient = httpClientFactory.CreateClient("Scrobbler_Kitsu");
         _logger = logger;
         _tokenStorage = tokenStorage;
         _tokenProtector = tokenProtector;
+        _resolver = resolver;
     }
     private static ConcurrentDictionary<string, decimal> _dedupState = new();
 
@@ -188,6 +194,7 @@ public class KitsuScrobblerProvider : IScrobblerProvider
 
     public async Task<List<ScrobblerSearchResult>> SearchSeriesAsync(string query, CancellationToken token = default)
     {
+        _logger.LogInformation("Kitsu: searching for '{Query}'", query);
         _httpClient.ApplyBearerToken(_accessToken);
         AddVND();
         var response = await _httpClient.GetAsync(
@@ -205,23 +212,16 @@ public class KitsuScrobblerProvider : IScrobblerProvider
             if (attr == null) continue;
             if (attr.MangaType!=null && attr.MangaType.Contains("novel", StringComparison.InvariantCultureIgnoreCase))
                 continue;
-            var altTitles = new List<string>();
+            var title = attr.CanonicalTitle ?? query;
+            var titleCandidates = new List<string?> { attr.CanonicalTitle };
             if (attr.Titles != null)
-            {
-                if (!string.IsNullOrEmpty(attr.Titles.En) &&
-                    !string.Equals(attr.CanonicalTitle, attr.Titles.En, StringComparison.OrdinalIgnoreCase))
-                    altTitles.Add(attr.Titles.En);
-                if (!string.IsNullOrEmpty(attr.Titles.EnJp))
-                    altTitles.Add(attr.Titles.EnJp);
-                if (!string.IsNullOrEmpty(attr.Titles.JaJp))
-                    altTitles.Add(attr.Titles.JaJp);
-            }
+                titleCandidates.AddRange(attr.Titles.Values);
 
             results.Add(new ScrobblerSearchResult
             {
                 ExternalId = item.Id ?? string.Empty,
-                Title = attr.CanonicalTitle ?? query,
-                AlternateTitles = altTitles,
+                Title = title,
+                AlternateTitles = TitleListBuilder.BuildAlternates(title, titleCandidates),
                 CoverUrl = attr.PosterImage?.Large ?? attr.PosterImage?.Medium ?? attr.PosterImage?.Original,
                 Type = attr.MangaType,
                 ChapterCount = attr.ChapterCount,
@@ -233,6 +233,72 @@ public class KitsuScrobblerProvider : IScrobblerProvider
         }
 
         return results;
+    }
+
+    /// <summary>
+    /// Fetches a Kitsu manga detail + its cross-site /mappings. Returns provider-native metadata
+    /// with LinkedSitesIds derived from mapping externalSite/externalId pairs.
+    /// </summary>
+    public async Task<SeriesMetadataResult?> FetchSeriesMetadataAsync(string externalSeriesId, CancellationToken token = default)
+    {
+        _logger.LogInformation("Kitsu: fetching metadata for id '{Id}'", externalSeriesId);
+        if (string.IsNullOrWhiteSpace(externalSeriesId)) return null;
+        try
+        {
+            _httpClient.ApplyBearerToken(_accessToken);
+            AddVND();
+
+            var detailResponse = await _httpClient.GetAsync(
+                $"{ApiBase}/manga/{Uri.EscapeDataString(externalSeriesId)}",
+                token);
+            if (!detailResponse.IsSuccessStatusCode) return null;
+            var detail = await detailResponse.Content.ReadFromJsonAsync<KitsuMangaEnvelope>(cancellationToken: token);
+            var manga = detail?.Data;
+            var attr = manga?.Attributes;
+            if (manga == null || attr == null) return null;
+
+            var title = attr.CanonicalTitle ?? externalSeriesId;
+            var titleCandidates = new List<string?> { attr.CanonicalTitle };
+            if (attr.Titles != null)
+                titleCandidates.AddRange(attr.Titles.Values);
+            var linkedSites = new List<string> { $"kitsu:{manga.Id}" };
+
+            // Cross-site mappings: /manga/{id}/mappings
+            var mappingsResponse = await _httpClient.GetAsync(
+                $"{ApiBase}/manga/{Uri.EscapeDataString(externalSeriesId)}/mappings",
+                token);
+            if (mappingsResponse.IsSuccessStatusCode)
+            {
+                var mappings = await mappingsResponse.Content.ReadFromJsonAsync<KitsuMappingsResponse>(cancellationToken: token);
+                if (mappings?.Data != null)
+                {
+                    foreach (var mapping in mappings.Data)
+                    {
+                        var canonical = _resolver.NormalizeSiteSlug(mapping.Attributes?.ExternalSite, ProviderType);
+                        if (canonical != null && !string.IsNullOrWhiteSpace(mapping.Attributes?.ExternalId))
+                        {
+                            string externalId = _resolver.NormalizeId(canonical, mapping.Attributes.ExternalId) ?? mapping.Attributes.ExternalId;
+                            linkedSites.Add($"{canonical}:{externalId}");
+                        }
+                    }
+                }
+            }
+
+            return new SeriesMetadataResult
+            {
+                ExternalId = manga.Id ?? externalSeriesId,
+                Title = title,
+                MetaData = JsonSerializer.Serialize(attr),
+                LinkedSitesIds = linkedSites.Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
+                AlternativeTitles = TitleListBuilder.BuildAlternates(title, titleCandidates),
+                CoverUrl = attr.PosterImage?.Original ?? attr.PosterImage?.Large ?? attr.PosterImage?.Medium
+            };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Kitsu detail failed for id '{Id}'", externalSeriesId);
+            return null;
+        }
     }
 
     public async Task<Dictionary<decimal, float>> GetReadChaptersAsync(string externalSeriesId, CancellationToken token = default)
@@ -372,7 +438,10 @@ public class KitsuScrobblerProvider : IScrobblerProvider
             return false;
         }
     }
-
+    public List<string> FilterLookupTitles(IEnumerable<string> titles)
+    {
+        return titles.ToList();
+    }
     public async Task<bool> ValidateTokenAsync(CancellationToken token = default)
     {
         try
@@ -420,7 +489,7 @@ public class KitsuScrobblerProvider : IScrobblerProvider
     private class KitsuMangaAttributes
     {
         public string? CanonicalTitle { get; set; }
-        public KitsuTitles? Titles { get; set; }
+        public Dictionary<string, string>? Titles { get; set; }
         public KitsuPosterImage? PosterImage { get; set; }
         public string? MangaType { get; set; }
         public int? ChapterCount { get; set; }
@@ -472,5 +541,29 @@ public class KitsuScrobblerProvider : IScrobblerProvider
     private class KitsuLibraryAttributes
     {
         public int Progress { get; set; }
+    }
+
+    private class KitsuMangaEnvelope
+    {
+        public KitsuMangaData? Data { get; set; }
+    }
+
+    private class KitsuMappingsResponse
+    {
+        public List<KitsuMappingData>? Data { get; set; }
+    }
+
+    private class KitsuMappingData
+    {
+        public string? Id { get; set; }
+        public KitsuMappingAttributes? Attributes { get; set; }
+    }
+
+    private class KitsuMappingAttributes
+    {
+        [System.Text.Json.Serialization.JsonPropertyName("externalSite")]
+        public string? ExternalSite { get; set; }
+        [System.Text.Json.Serialization.JsonPropertyName("externalId")]
+        public string? ExternalId { get; set; }
     }
 }

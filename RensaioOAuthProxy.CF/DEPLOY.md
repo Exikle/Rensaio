@@ -101,6 +101,18 @@ npx wrangler secret put PROXY_ANILIST_CLIENT_SECRET
 
 npx wrangler secret put PROXY_MYANIMELIST_CLIENT_SECRET
 # Paste your MAL client secret, press Enter
+```
+
+> **AniList dual-flow note:** AniList can run either:
+> - **Authorization Code Grant** — set `PROXY_ANILIST_CLIENT_SECRET`. The proxy
+>   exchanges the code server-side and refresh tokens work (silent renewal).
+> - **Implicit Grant** (default when the secret is NOT set) — public client flow.
+>   The access token is captured client-side from the redirect URL fragment,
+>   **no refresh token is issued**. Users re-authorize when it expires
+>   (AniList implicit tokens last ~1 year).
+>
+> To force a specific flow regardless of secret presence, set a var:
+> `PROXY_ANILIST_FLOW = "code"` or `PROXY_ANILIST_FLOW = "implicit"`.
 
 npx wrangler secret put PROXY_KITSU_CLIENT_SECRET
 # Paste your Kitsu client secret, press Enter

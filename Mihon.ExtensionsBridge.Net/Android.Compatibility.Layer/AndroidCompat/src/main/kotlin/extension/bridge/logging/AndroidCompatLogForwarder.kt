@@ -12,6 +12,17 @@ object AndroidCompatLogForwarder {
     private val sinkRef = AtomicReference<AndroidCompatLogSink?>(null)
     private val minimumLevel = AtomicReference(AndroidCompatLogLevel.INFO)
 
+    /**
+     * Tags whose log output is intentionally suppressed. The WebViewGlueBridge feature-probe
+     * (isFeatureSupported) fires on every WebView construction in this emulated, CEF-backed
+     * AndroidCompat layer. The Chromium support-library feature set is genuinely not shipped
+     * here, so the probe reports "not supported" after walking a series of reflection hops that
+     * historically surfaced as NoSuchMethodException / ClassNotFoundException / NPE log noise.
+     * The probe has no functional effect; filtering its tag is equivalent to tuning out a known
+     * internal probe and keeps the host logs clean.
+     */
+    private val suppressedTags = setOf("WebViewGlueBridge")
+
     fun registerSink(sink: AndroidCompatLogSink) {
         sinkRef.set(sink)
     }
@@ -37,6 +48,9 @@ object AndroidCompatLogForwarder {
             return
         }
         if (level.priority < minimumLevel.get().priority) {
+            return
+        }
+        if (tag in suppressedTags) {
             return
         }
         val renderedThrowable = throwable?.let(::renderThrowable)

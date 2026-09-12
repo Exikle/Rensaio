@@ -20,14 +20,14 @@ namespace RensaioBackend.Services.Scrobbling;
 /// </summary>
 public class ScrobblerSyncService
 {
-    private readonly ScrobblerProviderFactory _providerFactory;
+    private readonly ExternalSeriesProviderFactory _providerFactory;
     private readonly AppDbContext _db;
     private readonly ReadStateService _readStateService;
     private readonly SeriesMatchingService _matchingService;
     private readonly ILogger<ScrobblerSyncService> _logger;
 
     public ScrobblerSyncService(
-        ScrobblerProviderFactory providerFactory,
+        ExternalSeriesProviderFactory providerFactory,
         AppDbContext db,
         ReadStateService readStateService,
         SeriesMatchingService matchingService,
@@ -73,9 +73,9 @@ public class ScrobblerSyncService
         foreach (var config in configs)
         {
 
-            var mapping = await _db.UserSeriesMappings
-                .FirstOrDefaultAsync(m => m.UserId == userId && m.SeriesId == seriesId
-                    && m.Provider == config.Provider && m.MappingStatus != SeriesMappingStatus.Ignored, token);
+            var mapping = await _db.SeriesMappings
+                .FirstOrDefaultAsync(m => m.SeriesId == seriesId
+                    && m.Provider == config.Provider && IsMapForSync(m.MappingStatus), token);
             if (mapping == null)
                 continue;
             await SyncSeriesForProviderAsync(user, series, mapping, config, token);
@@ -93,17 +93,17 @@ public class ScrobblerSyncService
         foreach (var config in configs)
         {
             var provider = _providerFactory.GetProvider(config.Provider);
-            if (provider == null) continue;
+            if (provider is not IScrobblerProvider scrobblerProvider) continue;
             try
             {
-                var mapping = await _db.UserSeriesMappings
-                .FirstOrDefaultAsync(m => m.UserId == userId && m.SeriesId == seriesId
-                    && m.Provider == config.Provider && m.MappingStatus != SeriesMappingStatus.Ignored, token);
+                var mapping = await _db.SeriesMappings
+                    .FirstOrDefaultAsync(m => m.SeriesId == seriesId
+                        && m.Provider == config.Provider && IsMapForSync(m.MappingStatus), token);
                 if (mapping == null)
                     continue;
-                await provider.EnsureAuthenticatedAsync(user.Id, token);
+                await scrobblerProvider.EnsureAuthenticatedAsync(user.Id, token);
                 Dictionary<decimal, float> states = localStates.ToDictionary(s => s.ChapterNumber, s => s.Progress);
-                await provider.SetReadChaptersAsync(mapping.ExternalSeriesId, states, token);
+                await scrobblerProvider.SetReadChaptersAsync(mapping.ExternalSeriesId, states, token);
             }
             catch (Exception ex)
             {
@@ -117,7 +117,7 @@ public class ScrobblerSyncService
     /// Returns seriesId -> list of chapter read states.
     /// </summary>
     public async Task<Dictionary<Guid, List<ChapterReadState>>> DownloadReadStatesAsync(
-        Guid userId, ScrobblerProvider provider, CancellationToken token = default)
+        Guid userId, ExternalSeriesProvider provider, CancellationToken token = default)
     {
         var result = new Dictionary<Guid, List<ChapterReadState>>();
         var config = await _db.UserScrobblerConfigs
@@ -125,15 +125,16 @@ public class ScrobblerSyncService
 
         if (config == null || !config.IsEnabled) return result;
 
-        var scrobbler = _providerFactory.GetProvider(provider);
-        if (scrobbler == null) return result;
+        var providerInstance = _providerFactory.GetProvider(provider);
+        if (providerInstance is not IScrobblerProvider scrobbler) return result;
 
         await scrobbler.EnsureAuthenticatedAsync(userId, token);
 
-        var mappings = await _db.UserSeriesMappings
-            .Where(m => m.UserId == userId && m.Provider == provider
-                && m.MappingStatus != SeriesMappingStatus.Ignored
-                && !string.IsNullOrEmpty(m.ExternalSeriesId))
+        var mappings = await _db.SeriesMappings
+            .Where(m => m.Provider == provider
+                && IsMapForSync(m.MappingStatus)
+                && !string.IsNullOrEmpty(m.ExternalSeriesId)
+                && m.SeriesId != null)
             .ToListAsync(token);
 
         foreach (var mapping in mappings)
@@ -153,7 +154,8 @@ public class ScrobblerSyncService
                     })
                     .ToList();
 
-                result[mapping.SeriesId] = chapterStates;
+                if (mapping.SeriesId != null)
+                    result[(Guid)mapping.SeriesId] = chapterStates;
             }
             catch (Exception ex)
             {
@@ -192,9 +194,10 @@ public class ScrobblerSyncService
 
             // Download remote changes and merge
             var seriesList = await _db.Series.ToListAsync(token);
-            var mappings = await _db.UserSeriesMappings
-                .Where(m => m.UserId == user.Id && m.Provider == config.Provider
-                    && m.MappingStatus != SeriesMappingStatus.Ignored)
+            var mappings = await _db.SeriesMappings
+                .Where(m => m.Provider == config.Provider
+                    && IsMapForSync(m.MappingStatus)
+                    && m.SeriesId != null)
                 .ToListAsync(token);
 
             var series = await _db.Series.Where(s => mappings.Select(m => m.SeriesId).Contains(s.Id)).ToListAsync(token);
@@ -214,24 +217,33 @@ public class ScrobblerSyncService
         }
     }
 
-    private async Task SyncSeriesForProviderAsync(UserEntity user, SeriesEntity series, UserSeriesMappingEntity mapping, UserScrobblerConfigEntity config, CancellationToken token)
+    private async Task SyncSeriesForProviderAsync(UserEntity user, SeriesEntity series, SeriesMappingEntity mapping, UserScrobblerConfigEntity config, CancellationToken token)
     {
         var provider = _providerFactory.GetProvider(config.Provider);
-        if (provider == null) return;
+        if (provider is not IScrobblerProvider scrobbler) return;
 
-        await provider.EnsureAuthenticatedAsync(user.Id, token);
+        await scrobbler.EnsureAuthenticatedAsync(user.Id, token);
 
         if (series == null) return;
 
         // Download remote state
-        var remoteChapters = await provider.GetReadChaptersAsync(mapping.ExternalSeriesId, token);
+        var remoteChapters = await scrobbler.GetReadChaptersAsync(mapping.ExternalSeriesId, token);
         var localStates = _readStateService.GetSeriesReadStates(user.Username, series.StoragePath);
 
         Dictionary<decimal, float> states = localStates.ToDictionary(s => s.ChapterNumber, s => s.Progress);
         // Upload new local chapters that aren't on remote
 
-        await provider.SetReadChaptersAsync(mapping.ExternalSeriesId, states, token);
+        await scrobbler.SetReadChaptersAsync(mapping.ExternalSeriesId, states, token);
 
         config.LastDownloadAt = DateTime.UtcNow;
     }
+
+    /// <summary>
+    /// True when a mapping is "active" enough to be synced to a scrobbler: it has been
+    /// auto-matched, user-confirmed, or manually linked. All refusal/ignored statuses
+    /// (TemporaryIgnored, ForeverIgnored, Blocked) and Unmatched are excluded.
+    /// </summary>
+    private static bool IsMapForSync(SeriesMappingStatus status)
+        => status == SeriesMappingStatus.AutoMatched
+            || status == SeriesMappingStatus.UserConfirmed;
 }

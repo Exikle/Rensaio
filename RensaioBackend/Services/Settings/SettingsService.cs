@@ -4,6 +4,7 @@ using RensaioBackend.Models.Dto;
 using RensaioBackend.Models.Enums;
 using RensaioBackend.Services.Background;
 using RensaioBackend.Services.Bridge;
+using RensaioBackend.Services.Contributions;
 using RensaioBackend.Services.Jobs;
 using RensaioBackend.Services.Jobs.Models;
 using RensaioBackend.Services.Jobs.Settings;
@@ -26,12 +27,18 @@ namespace RensaioBackend.Services.Settings
 
         private static SettingsDto? _settings;
 
-        public SettingsService(IConfiguration config, IServiceScopeFactory prov, AppDbContext db)
+        private readonly ContributionVerificationService _verificationService;
+
+        public SettingsService(
+            IConfiguration config,
+            IServiceScopeFactory prov,
+            AppDbContext db,
+            ContributionVerificationService verificationService)
         {
             _config = config;
             _db = db;
             _prov = prov;
-
+            _verificationService = verificationService;
         }
 
 
@@ -371,9 +378,81 @@ namespace RensaioBackend.Services.Settings
                 ProviderErrorRedHours = settings.ProviderErrorRedHours,
                 AuthenticationEnabled = settings.AuthenticationEnabled,
                 ExternalDomain = settings.ExternalDomain,
+                ContributionEnabled = settings.ContributionEnabled,
+                ContributionServerUrl = settings.ContributionServerUrl,
+                ContributionContributorId = settings.ContributionContributorId,
+                // Server-computed — preserve the currently stored verified state. The
+                // client payload can never flip this flag; only an actual verification
+                // round-trip against the contribution worker may set it.
+                ContributionVerified = _settings?.ContributionVerified ?? false,
             };
 
             await SaveSettingsAsync(editableSettings, force, token).ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// Verifies a Contributor Id against the configured contribution server
+        /// (RensaioContributionDB.CF). Pure validation — does not persist anything.
+        /// </summary>
+        public async Task<ContributionVerificationResult> VerifyContributorAsync(
+            string serverUrl,
+            string contributorId,
+            CancellationToken token = default)
+        {
+            return await _verificationService.VerifyAsync(serverUrl, contributorId, token).ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// Persists the verified flag (and, when provided, the contributor id and
+        /// server URL so a post-verify settings refetch keeps them) and refreshes
+        /// the in-memory settings cache so downstream gates pick it up immediately.
+        /// </summary>
+        public async Task SetContributionVerifiedAsync(
+            bool verified,
+            CancellationToken token = default,
+            string? contributorId = null,
+            string? serverUrl = null)
+        {
+            await UpsertSettingAsync(nameof(EditableSettingsDto.ContributionVerified), verified.ToString(), token).ConfigureAwait(false);
+            if (contributorId != null)
+            {
+                await UpsertSettingAsync(nameof(EditableSettingsDto.ContributionContributorId), contributorId, token).ConfigureAwait(false);
+            }
+            if (serverUrl != null)
+            {
+                await UpsertSettingAsync(nameof(EditableSettingsDto.ContributionServerUrl), serverUrl, token).ConfigureAwait(false);
+            }
+
+            if (_settings != null)
+            {
+                _settings.ContributionVerified = verified;
+                if (contributorId != null)
+                {
+                    _settings.ContributionContributorId = contributorId;
+                }
+                if (serverUrl != null)
+                {
+                    _settings.ContributionServerUrl = serverUrl;
+                }
+            }
+        }
+
+        private async Task UpsertSettingAsync(string name, string value, CancellationToken token)
+        {
+            SettingEntity? setting = await _db.Settings
+                .FirstOrDefaultAsync(s => s.Name == name, token)
+                .ConfigureAwait(false);
+
+            if (setting == null)
+            {
+                _db.Settings.Add(new SettingEntity { Name = name, Value = value });
+                await _db.SaveChangesAsync(token).ConfigureAwait(false);
+            }
+            else if (setting.Value != value)
+            {
+                setting.Value = value;
+                await _db.SaveChangesAsync(token).ConfigureAwait(false);
+            }
         }
 
         public SettingsDto GetFromEditableSettings(EditableSettingsDto ed)
@@ -419,6 +498,10 @@ namespace RensaioBackend.Services.Settings
                 ProviderErrorRedHours = ed.ProviderErrorRedHours,
                 AuthenticationEnabled = ed.AuthenticationEnabled,
                 ExternalDomain = ed.ExternalDomain,
+                ContributionEnabled = ed.ContributionEnabled,
+                ContributionServerUrl = ed.ContributionServerUrl,
+                ContributionContributorId = ed.ContributionContributorId,
+                ContributionVerified = ed.ContributionVerified,
             };
             set.StorageFolder = _config["StorageFolder"] ?? string.Empty;
             return set;

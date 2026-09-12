@@ -9,11 +9,13 @@
     "db:list": "wrangler d1 migrations list rensaio-contribution-db"
   },
   "dependencies": {
-    "hono": "^4.6.0"
+    "brotli-wasm": "^3.0.1",
+    "hono": "^4.6.0",
+    "zstdify": "^1.4.0"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20240601.0",
-    "wrangler": "^3.60.0",
-    "typescript": "^5.5.0"
+    "typescript": "^5.5.0",
+    "wrangler": "^3.60.0"
   }
 }

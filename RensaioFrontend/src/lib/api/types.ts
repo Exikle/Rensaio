@@ -1,4 +1,4 @@
-// Sentinel GUID used to signal creation of a new user-based provider in the match flow
+ 2// Sentinel GUID used to signal creation of a new user-based provider in the match flow
 export const NEW_PROVIDER_SENTINEL = "00000000-0000-0000-0000-000000000000";
 
 export interface Chapter {
@@ -54,6 +54,13 @@ export interface Settings {
   // Security settings
   authenticationEnabled: boolean;
   externalDomain: string;
+  // Contribution settings
+  contributionEnabled: boolean;
+  contributionServerUrl: string;
+  contributionContributorId: string;
+  // Server-computed flag — true only after the Contributor Id was verified
+  // against RensaioContributionDB.CF and the contributor is active.
+  contributionVerified: boolean;
 }
 
 export interface LinkedSeries {
@@ -323,6 +330,8 @@ export enum JobType {
   DailyUpdate = 9,
   StatusCheck = 10,
   ScrobblerSync = 11,
+  VerifyAllSeries = 12,
+  MetadataLink = 13,
 }
 
 export enum ProgressStatus {
@@ -774,39 +783,63 @@ export enum ScrobblerProvider {
   ComicVine = 2,
   Kitsu = 3,
   MangaDex = 4,
+
+  // ── Metadata providers ──
+  MangaBaka = 10,
+  Bangumi = 11,
+  MangaUpdates = 12,
+}
+
+// Bit flags mirroring backend ProviderFeatures enum.
+export enum ProviderFeatures {
+  None = 0,
+  Scrobbling = 1 << 0,
+  Metadata = 1 << 1,
 }
 
 export interface ScrobblerConfig {
   provider: ScrobblerProvider;
   displayName: string;
+  icon?: string;
+  link?: string;
+  linkDescription?: string;
   isEnabled: boolean;
   isConnected: boolean;
   autoSync: boolean;
   lastSyncAt?: string;
   lastUploadAt?: string;
   lastDownloadAt?: string;
+  supportsDirectAuth?: boolean;
+  seriesUrlTemplate?: string;
+  imageTemplateUrl?: string;
+  features?: number;
 }
 
 export interface ScrobblerSearchResult {
   externalId: string;
   title: string;
   alternateTitles: string[];
+  linkedSitesIds?: string[];
   coverUrl?: string;
   type?: string;
   chapterCount?: number;
   status?: string;
   synopsis?: string;
   score?: number;
+  year?: string;
 }
 
 export interface SeriesMatchStatus {
   seriesId: string;
   seriesTitle: string;
+  seriesCoverUrl?: string;
+  alternativeTitles?: string;
   provider: ScrobblerProvider;
   mappingStatus: SeriesMappingStatus;
   externalSeriesId?: string;
   externalSeriesTitle?: string;
   externalCoverUrl?: string;
+  externalSeriesUrl?: string;
   matchScore?: number;
 }
 
@@ -814,7 +847,95 @@ export enum SeriesMappingStatus {
   Unmatched = 0,
   AutoMatched = 1,
   UserConfirmed = 2,
-  Ignored = 3,
+  TemporaryIgnored = 3,
+  ForeverIgnored = 4,
+  Blocked = 5,
+}
+
+/** One provider row inside a series group on the External Mappings page. */
+export interface ExternalSeriesProviderMapping {
+  providerCoverUrl?: string;
+  provider: ScrobblerProvider;
+  externalSeriesId: string;
+  externalSeriesTitle?: string;
+  mappingStatus: SeriesMappingStatus;
+  linkedDate?: string;
+  linkedSitesIds: string[];
+  alternativeTitles: string[];
+}
+
+/** Static per-provider presentation info returned at the root of the page response. */
+export interface ExternalProviderMeta {
+  icon?: string;
+  seriesUrlTemplate?: string;
+}
+
+/** One grouped series on the External Mappings page (series scope). */
+export interface ExternalSeriesGroup {
+  seriesId: string;
+  seriesTitle?: string;
+  seriesCoverUrl?: string;
+  providers: ExternalSeriesProviderMapping[];
+}
+
+export interface ExternalTitleAssociation {
+  provider: ScrobblerProvider;
+  providerKey: string;
+  linkType: number;
+}
+
+export interface ExternalTitleMapping {
+  titleId: string;
+  title: string;
+  type?: string;
+  associations: ExternalTitleAssociation[];
+}
+
+export interface ExternalMappingsPage {
+  page: number;
+  pageSize: number;
+  total: number;
+  /** Keyed by provider name (e.g. "MangaBaka") so components look it up via ScrobblerProvider[provider]. */
+  providerMeta: Partial<Record<string, ExternalProviderMeta>>;
+  series: ExternalSeriesGroup[];
+  titles: ExternalTitleMapping[];
+}
+
+/** One member source within a contribution mapping group (source scope). */
+export interface ContributionMappingSource {
+  sourceId: string;
+  sourceKey: string;
+  package: string;
+  sourceName: string;
+  sourceLanguage: string;
+  title?: string;
+  thumbnailUrl?: string;
+}
+
+/** One grouped mapping on the Contribution Mappings page (source scope, automerged by normalized title). */
+export interface ContributionMappingGroup {
+  mappingId: string;
+  displayTitle?: string;
+  coverUrl?: string;
+  titles: string[];
+  sources: ContributionMappingSource[];
+  providers: ExternalSeriesProviderMapping[];
+}
+
+export interface ContributionMappingsPage {
+  page: number;
+  pageSize: number;
+  total: number;
+  /** Same shape as External Mappings providerMeta. */
+  providerMeta: Partial<Record<string, ExternalProviderMeta>>;
+  groups: ContributionMappingGroup[];
+}
+
+export interface ContributionMappingLinkRequest {
+  mappingId: string;
+  provider: ScrobblerProvider;
+  externalSeriesId: string;
+  externalSeriesTitle?: string;
 }
 
 export interface ScrobblerConfigUpdate {
@@ -866,4 +987,68 @@ export interface SyncStatus {
 export interface OAuthAuthorizeResponse {
   authUrl: string;
   state: string;
+  /** True when the provider needs no authorization (public/API-key metadata provider). */
+  noAuthRequired?: boolean;
+}
+
+export interface KitsuDirectAuthRequest {
+  email: string;
+  password: string;
+}
+
+export interface MangaDexDirectAuthRequest {
+  username: string;
+  password: string;
+  clientId: string;
+  clientSecret: string;
+}
+
+// ── Metadata Link Engine Types ──
+
+export interface MetadataLinkRequest {
+  seriesId: string;
+}
+
+export interface MetadataRefreshRequest {
+  seriesId: string;
+  provider?: ScrobblerProvider;
+}
+
+export interface MetadataLinkEntry {
+  provider: ScrobblerProvider;
+  externalSeriesId: string;
+  title?: string;
+  confidence: number;
+  status: 'Linked' | 'Suggested' | 'Failed';
+  linkedSitesIds: string[];
+  alternativeTitles: string[];
+}
+
+export interface MetadataLinkResult {
+  seriesId: string;
+  seriesTitle?: string;
+  links: MetadataLinkEntry[];
+  suggestions: MetadataLinkEntry[];
+  providersSearched: number;
+  elapsedMs: number;
+}
+
+export interface MetadataLinkAllResult {
+  processedSeries: number;
+  linkedProviderEntries: number;
+  suggestedEntries: number;
+}
+
+export interface MetadataSeriesMappingView {
+  provider: ScrobblerProvider;
+  externalSeriesId: string;
+  externalSeriesTitle?: string;
+  linkedSitesIds: string[];
+  alternativeTitles: string[];
+}
+
+export interface MetadataSeriesView {
+  seriesId: string;
+  seriesTitle?: string;
+  mappings: MetadataSeriesMappingView[];
 }

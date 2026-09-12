@@ -29,42 +29,83 @@ namespace RensaioBackend.Services.Bridge
             _bridgeManager = bridgeManager;
             _workingFolderStructure = workingFolderStructure;
         }
+        /// <summary>
+        /// Default number of retries (after the initial attempt) for transient HTTP errors that
+        /// warrant exponential backoff before giving up on a Mihon extension call.
+        /// </summary>IMetadataProvider
+        private const int DefaultMaxRetries = 5;
+
+        /// <summary>
+        /// Base delay (seconds) for the first retry; each subsequent retry doubles it, so a run of
+        /// 3 retries waits 2s, 4s, then 8s before the final attempt.
+        /// </summary>
+        private static readonly TimeSpan RetryBaseDelay = TimeSpan.FromSeconds(2);
+
         public async Task<T?> MihonErrorWrapperAsync<T>(Func<Task<T>> func, string errorMessage, params object[] pars) where T : class, new()
         {
             // Global in-flight budget for source-extension calls (see SourceTimeoutGate).
             // All extension calls (details, chapters, pages, images, latest) flow through here,
             // so this bounds the total concurrent IKVM-crossing work regardless of how many
             // parallel loops or downloads are active.
-            try
+            for (int attempt = 0; ; attempt++)
             {
-                using (await SourceTimeoutGate.AcquireAsync(CancellationToken.None).ConfigureAwait(false))
+                try
                 {
-                    return await func().ConfigureAwait(false);
+                    using (await SourceTimeoutGate.AcquireAsync(CancellationToken.None).ConfigureAwait(false))
+                    {
+                        return await func().ConfigureAwait(false);
+                    }
+                }
+                catch (HttpRequestException httpEx)
+                {
+                    HttpStatusCode status = httpEx.StatusCode ?? HttpStatusCode.InternalServerError;
+
+                    // Retry with exponential backoff on the two transient responses we care about:
+                    //  - TooManyRequests (429): the server explicitly asked us to back off.
+                    //  - NotFound (404): some Cloudflare-protected sources return an empty/404 page
+                    //    when their bot/rate-limit detection triggers.
+                    if (IsRetryableHttpStatus(status) && attempt < DefaultMaxRetries)
+                    {
+                        await Task.Delay(ComputeBackoff(attempt)).ConfigureAwait(false);
+                        continue;
+                    }
+
+                    object[] pars2 = pars.ToArray();
+                    Array.Resize(ref pars2, pars2.Length + 1);
+                    pars2[^1] = status;
+                    _logger.LogError(errorMessage + " Http Error: {httperror}", pars2);
+                    return null;
+                }
+                catch (TaskCanceledException)
+                {
+                    _logger.LogError(errorMessage + " Task was cancelled", pars);
+                    return null;
+                }
+                catch (OperationCanceledException)
+                {
+                    _logger.LogError(errorMessage + " Operation was cancelled", pars);
+                    return null;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, errorMessage, pars);
+                    return null;
                 }
             }
-            catch (HttpRequestException httpEx)
-            {
-                object[] pars2 = pars.ToArray();
-                Array.Resize(ref pars2, pars2.Length + 1);
-                pars2[^1] = httpEx.StatusCode ?? HttpStatusCode.InternalServerError;
-                _logger.LogError(errorMessage + " Http Error: {httperror}", pars2);
-                return null;
-            }
-            catch (TaskCanceledException)
-            {
-                _logger.LogError(errorMessage + " Task was cancelled", pars);
-                return null;
-            }
-            catch (OperationCanceledException)
-            {
-                _logger.LogError(errorMessage + " Operation was cancelled", pars);
-                return null;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, errorMessage, pars);
-                return null;
-            }
+        }
+
+        private static bool IsRetryableHttpStatus(HttpStatusCode status)
+            => status == HttpStatusCode.TooManyRequests || status == HttpStatusCode.NotFound;
+
+        private static TimeSpan ComputeBackoff(int attempt)
+        {
+            // Exponential backoff: 2s, 4s, 8s for attempts 0, 1, 2. The exponent is capped so an
+            // unexpected over-run never yields an absurd delay. A small random jitter spreads
+            // parallel retries so multiple sources don't all hammer the server in lock-step.
+            int shift = Math.Min(attempt, 4);
+            double baseSeconds = RetryBaseDelay.TotalSeconds * (1 << shift);
+            double jitter = Random.Shared.NextDouble() * 0.5; // up to 500ms
+            return TimeSpan.FromSeconds(baseSeconds + jitter);
         }
         private async Task<IExtensionInterop> GetFromNameAsync(string name, CancellationToken token = default)
         {

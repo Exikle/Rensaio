@@ -100,6 +100,33 @@ public class WebView extends AbsoluteLayout
         mProviderFactory = factory;
     }
 
+    /**
+     * Truthful feature probe used by the Android SDK's internal glue (WebViewGlueBridge).
+     * This CEF-backed emulation does not provide the Chromium support-library feature set
+     * (USER_AGENT_METADATA etc.), so every feature is reported as unsupported. Returning false
+     * cleanly (instead of throwing NoSuchMethodException / ClassNotFoundException through the
+     * reflective chain) is what the glue expects for a WebView without the support library.
+     */
+    public static boolean isFeatureSupported(String feature) {
+        return false;
+    }
+
+    /**
+     * Compatibility accessor used by the Android SDK's internal glue (WebViewGlueBridge),
+     * which reflectively probes for {@code WebView.getFactory()} to feature-detect. The glue
+     * REQUIRES a non-null object (it calls getClass() on the result), so we return a stable,
+     * non-null place-holder instance. It is never used for real WebView construction - this
+     * emulated WebView builds through {@link #setProviderFactory} and {@link #mProviderFactory}
+     * only. The probe's subsequent hops (loading org.chromium.support_lib_glue.*) are handled
+     * by the stub classes we ship, and the probe's own log output is filtered at the logger
+     * bridge because it is an inherent no-op for an emulated WebView.
+     */
+    private static final Object sFactoryPlaceholder = new Object();
+
+    public static Object getFactory() {
+        return mProviderFactory != null ? mProviderFactory : sFactoryPlaceholder;
+    }
+
     public class WebViewTransport {
         private WebView mWebview;
 

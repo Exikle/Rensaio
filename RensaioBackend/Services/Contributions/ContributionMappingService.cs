@@ -1,0 +1,646 @@
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
+using RensaioBackend.Data;
+using RensaioBackend.Models;
+using RensaioBackend.Models.ContributionDatabase;
+using RensaioBackend.Models.Database;
+using RensaioBackend.Models.Dto;
+using RensaioBackend.Models.Enums;
+using RensaioBackend.Services.Jobs;
+using RensaioBackend.Services.Metadata;
+using RensaioBackend.Services.Scrobbling.Abstractions;
+
+namespace RensaioBackend.Services.Contributions;
+
+/// <summary>
+/// Read/write service for the Contribution Mappings page (source scope). Reads and mutates the
+/// local contribution database (<c>contributor.db</c>) as the source of truth.
+///
+/// Auto-merge semantics: sources whose normalized titles collide (they resolve to the same
+/// <see cref="TitleEntity"/>) are grouped under one <see cref="MappingEntity"/>. All writes stamp
+/// <c>Version = 0</c> (add/update) or <c>-1</c> (tombstone) so the existing
+/// <see cref="ContributionUploadService"/> picks them up for cloud sync unchanged.
+///
+/// The cross-provider search/score/propagation algorithm is delegated to
+/// <see cref="MetadataMatchCore"/> (shared with the Rensaio-DB External Mappings flow) — nothing
+/// is copy-pasted.
+/// </summary>
+public sealed class ContributionMappingService
+{
+    private const int VersionAddOrUpdate = 0;
+    private const int VersionLogicalDelete = -1;
+
+    // SignalR progress ids — distinct from the External Mappings engine's "metadata-link-*".
+    public const string LinkAllJobId = "contribution-link-all";
+
+    private readonly ContributionDbContext _contributorDb;
+    private readonly MetadataMatchCore _matchCore;
+    private readonly JobHubReportService _hubReport;
+    private readonly ILogger<ContributionMappingService> _logger;
+
+    public ContributionMappingService(
+        ContributionDbContext contributorDb,
+        MetadataMatchCore matchCore,
+        JobHubReportService hubReport,
+        ILogger<ContributionMappingService> logger)
+    {
+        _contributorDb = contributorDb;
+        _matchCore = matchCore;
+        _hubReport = hubReport;
+        _logger = logger;
+    }
+
+    /// <summary>
+    /// Lists contribution mappings grouped by mapping (source scope), paginated over mappings.
+    /// </summary>
+    public async Task<ContributionMappingsPageDto> ListMappingsAsync(
+        string filter, int page, int pageSize, ExternalSeriesProvider? provider, SeriesMappingStatus? status,
+        List<IExternalSeriesProvider> enabledProviders, CancellationToken token)
+    {
+        var isUnmatchedFilter = string.Equals(filter, "unmatched", StringComparison.OrdinalIgnoreCase)
+            || string.IsNullOrWhiteSpace(filter);
+        var nowMinusOneMonth = DateTime.UtcNow.AddMonths(-1);
+
+        var result = new ContributionMappingsPageDto
+        {
+            Page = page,
+            PageSize = pageSize,
+            Total = 0,
+            ProviderMeta = ExternalMappingSupport.BuildProviderMeta(enabledProviders)
+        };
+
+        // Load the whole (small) contribution graph once and group in memory.
+        var mappingTitles = await _contributorDb.MappingTitles
+            .Include(mt => mt.Title)
+            .AsNoTracking()
+            .ToListAsync(token).ConfigureAwait(false);
+        // Skip tombstones for query projection (rows are only logical-deleted for replication).
+        var seriesRows = await _contributorDb.Series
+            .Include(s => s.Source)
+            .Where(s => s.Version >= 0)
+            .AsNoTracking()
+            .ToListAsync(token).ConfigureAwait(false);
+        var metadataRows = await _contributorDb.Metadata
+            .AsNoTracking()
+            .ToListAsync(token).ConfigureAwait(false);
+
+        var groupsByMapping = mappingTitles
+            .GroupBy(mt => mt.MappingId)
+            .OrderBy(g => g.FirstOrDefault(mt => mt.Title != null)?.Title?.Title ?? string.Empty, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        var groups = new List<ContributionMappingGroupDto>();
+
+        foreach (var grp in groupsByMapping)
+        {
+            var mappingId = grp.Key;
+            var titles = grp
+                .Where(mt => mt.Title != null && !string.IsNullOrWhiteSpace(mt.Title.Title))
+                .Select(mt => mt.Title!.Title!)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            var sources = seriesRows
+                .Where(s => s.MappingId == mappingId)
+                .Select(s => ToSourceDto(s))
+                .Where(s => s != null)
+                .Cast<ContributionMappingSourceDto>()
+                .ToList();
+
+            var providerRows = new List<ExternalMappingsSeriesProviderDto>();
+            var groupHasUnmatched = false;
+            foreach (var m in metadataRows.Where(x => x.MappingId == mappingId))
+            {
+                if (provider.HasValue && (ExternalSeriesProvider)m.ProviderId != provider.Value) continue;
+
+                var row = new ExternalMappingsSeriesProviderDto
+                {
+                    ProviderCoverUrl = null, // contribution metadata rows carry no cover in V1 schema
+                    Provider = (ExternalSeriesProvider)m.ProviderId,
+                    ExternalSeriesId = m.ProviderKey ?? string.Empty,
+                    ExternalSeriesTitle = null,
+                    MappingStatus = m.MappingStatus,
+                    LinkedDate = m.LinkedDate,
+                    LinkedSitesIds = [],
+                    AlternativeTitles = []
+                };
+
+                // Expired TemporaryIgnored → treat as Unmatched again (same rule as External Mappings).
+                if (row.MappingStatus == SeriesMappingStatus.TemporaryIgnored &&
+                    row.LinkedDate != null &&
+                    row.LinkedDate <= nowMinusOneMonth)
+                {
+                    row.MappingStatus = SeriesMappingStatus.Unmatched;
+                }
+
+                if (status.HasValue && row.MappingStatus != status.Value) continue;
+                if (!status.HasValue && !IsActiveStatus(row.MappingStatus)) continue;
+
+                if (row.MappingStatus == SeriesMappingStatus.Unmatched) groupHasUnmatched = true;
+                providerRows.Add(row);
+            }
+
+            if (providerRows.Count == 0) continue;
+            if (isUnmatchedFilter && !groupHasUnmatched) continue;
+
+            groups.Add(new ContributionMappingGroupDto
+            {
+                MappingId = mappingId,
+                DisplayTitle = titles.FirstOrDefault() ?? "Untitled",
+                CoverUrl = sources.FirstOrDefault(s => !string.IsNullOrWhiteSpace(s.ThumbnailUrl))?.ThumbnailUrl,
+                Titles = titles,
+                Sources = sources,
+                Providers = providerRows
+            });
+        }
+
+        groups.Sort((a, b) => (a.DisplayTitle ?? string.Empty).CompareTo(b.DisplayTitle ?? string.Empty));
+
+        result.Total = groups.Count;
+        result.Groups = groups
+            .Skip(page * pageSize).Take(pageSize)
+            .ToList();
+        return result;
+    }
+
+    /// <summary>Single contribution mapping group (all provider rows + merged sources + titles).</summary>
+    public async Task<ContributionMappingGroupDto?> GetMappingAsync(
+        Guid mappingId, List<IExternalSeriesProvider> enabledProviders, CancellationToken token)
+    {
+        var mappingTitles = await _contributorDb.MappingTitles
+            .Include(mt => mt.Title)
+            .Where(mt => mt.MappingId == mappingId)
+            .AsNoTracking()
+            .ToListAsync(token).ConfigureAwait(false);
+        if (mappingTitles.Count == 0) return null;
+
+        var titles = mappingTitles
+            .Where(mt => mt.Title != null && !string.IsNullOrWhiteSpace(mt.Title.Title))
+            .Select(mt => mt.Title!.Title!)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        var seriesRows = await _contributorDb.Series
+            .Include(s => s.Source)
+            .Where(s => s.MappingId == mappingId && s.Version >= 0)
+            .AsNoTracking()
+            .ToListAsync(token).ConfigureAwait(false);
+        var sources = seriesRows.Select(ToSourceDto).Where(s => s != null).Cast<ContributionMappingSourceDto>().ToList();
+
+        var metadataRows = await _contributorDb.Metadata
+            .Where(m => m.MappingId == mappingId)
+            .AsNoTracking()
+            .ToListAsync(token).ConfigureAwait(false);
+
+        var providerRows = metadataRows.Select(m => new ExternalMappingsSeriesProviderDto
+        {
+            ProviderCoverUrl = null,
+            Provider = (ExternalSeriesProvider)m.ProviderId,
+            ExternalSeriesId = m.ProviderKey ?? string.Empty,
+            ExternalSeriesTitle = null,
+            MappingStatus = m.MappingStatus,
+            LinkedDate = m.LinkedDate,
+            LinkedSitesIds = [],
+            AlternativeTitles = []
+        }).ToList();
+
+        return new ContributionMappingGroupDto
+        {
+            MappingId = mappingId,
+            DisplayTitle = titles.FirstOrDefault() ?? "Untitled",
+            CoverUrl = sources.FirstOrDefault(s => !string.IsNullOrWhiteSpace(s.ThumbnailUrl))?.ThumbnailUrl,
+            Titles = titles,
+            Sources = sources,
+            Providers = providerRows
+        };
+    }
+
+    /// <summary>
+    /// Resolves the titles of a mapping, builds seeds/rules from its metadata rows, runs the shared
+    /// matcher and persists the linked results + materialized Unmatched rows into the contribution
+    /// DB. Mirrors <c>MetadataLinkEngine.LinkSeriesAsync</c> but against <c>ContributionDbContext</c>.
+    /// </summary>
+    public async Task<Metadata.MetadataMatchResult> ScanMappingAsync(
+        Guid mappingId, List<IExternalSeriesProvider> providers, CancellationToken token)
+    {
+        // 1. Gather the mapping's title candidates (the automerge identity set).
+        var mappingTitles = await _contributorDb.MappingTitles
+            .Include(mt => mt.Title)
+            .Where(mt => mt.MappingId == mappingId)
+            .AsNoTracking()
+            .ToListAsync(token).ConfigureAwait(false);
+        var titleCandidates = mappingTitles
+            .Where(mt => mt.Title != null && !string.IsNullOrWhiteSpace(mt.Title.Title))
+            .Select(mt => mt.Title!.Title!)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        if (titleCandidates.Count == 0) return new Metadata.MetadataMatchResult();
+
+        // 2. Derive seeds, blocked ids and skipped providers from the existing metadata rows.
+        var existing = await _contributorDb.Metadata
+            .Where(m => m.MappingId == mappingId)
+            .AsNoTracking()
+            .ToListAsync(token).ConfigureAwait(false);
+
+        var seeds = new List<MetadataLinkSeed>();
+        var blockedIds = new Dictionary<ExternalSeriesProvider, HashSet<string>>();
+        var skippedProviders = new HashSet<ExternalSeriesProvider>();
+        var now = DateTime.UtcNow;
+        var ignoreThreshold = now.AddMonths(-1);
+        var reEvaluated = new List<ContributionMetadataEntity>();
+
+        foreach (var m in existing)
+        {
+            var p = (ExternalSeriesProvider)m.ProviderId;
+            switch (m.MappingStatus)
+            {
+                case SeriesMappingStatus.Blocked:
+                    if (!string.IsNullOrWhiteSpace(m.ProviderKey))
+                    {
+                        if (!blockedIds.TryGetValue(p, out var set))
+                            blockedIds[p] = set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                        set.Add(m.ProviderKey);
+                    }
+                    break;
+                case SeriesMappingStatus.ForeverIgnored:
+                    skippedProviders.Add(p);
+                    break;
+                case SeriesMappingStatus.TemporaryIgnored:
+                    if (m.LinkedDate != null && m.LinkedDate <= ignoreThreshold)
+                        reEvaluated.Add(m); // expired → re-evaluate (cleared below)
+                    else
+                        skippedProviders.Add(p);
+                    break;
+                default:
+                    if (!string.IsNullOrWhiteSpace(m.ProviderKey))
+                    {
+                        seeds.Add(new MetadataLinkSeed
+                        {
+                            Provider = p,
+                            ExternalSeriesId = m.ProviderKey,
+                            Confidence = 1.0
+                        });
+                    }
+                    break;
+            }
+        }
+
+        // 3. Run the shared matcher (search + second pass + cross-site propagation).
+        var enabled = providers.Select(p => p.ProviderType).ToHashSet();
+        var match = await _matchCore.MatchAsync(titleCandidates, providers, seeds, blockedIds,
+            skippedProviders, enabled, token).ConfigureAwait(false);
+
+        // 4. Persist linked nodes as ContributionMetadata rows.
+        var desired = new HashSet<(int ProviderId, string ProviderKey)>();
+        var byIdentity = existing.ToDictionary(m => (m.ProviderId, m.ProviderKey ?? string.Empty));
+
+        foreach (var node in match.Links)
+        {
+            var identity = ((int)node.Provider, node.ExternalSeriesId);
+            desired.Add(identity);
+            if (byIdentity.TryGetValue(identity, out var row))
+            {
+                var changed = row.MappingStatus != SeriesMappingStatus.AutoMatched
+                    || row.Version == VersionLogicalDelete
+                    || row.LinkedDate == null;
+                if (changed)
+                {
+                    _contributorDb.Metadata.Attach(row);
+                    row.MappingStatus = SeriesMappingStatus.AutoMatched;
+                    row.LinkedDate = now;
+                    row.Version = VersionAddOrUpdate;
+                    _contributorDb.Entry(row).Property(x => x.MappingStatus).IsModified = true;
+                    _contributorDb.Entry(row).Property(x => x.LinkedDate).IsModified = true;
+                    _contributorDb.Entry(row).Property(x => x.Version).IsModified = true;
+                }
+            }
+            else
+            {
+                _contributorDb.Metadata.Add(new ContributionMetadataEntity
+                {
+                    Id = Guid.NewGuid(),
+                    MappingId = mappingId,
+                    ProviderId = (int)node.Provider,
+                    ProviderKey = node.ExternalSeriesId,
+                    MappingStatus = SeriesMappingStatus.AutoMatched,
+                    LinkedDate = now,
+                    Version = VersionAddOrUpdate
+                });
+            }
+        }
+
+        // 5. Materialize Unmatched rows for enabled providers that ended with no link and no decision.
+        //    A provider already having ANY active metadata row (matched or decided) must never get
+        //    a second (provider, "") Unmatched row — the "Not matched" duplicate from the bug report.
+        foreach (var p in providers)
+        {
+            var identity = ((int)p.ProviderType, string.Empty);
+            if (desired.Contains(identity) || byIdentity.ContainsKey(identity)) continue;
+            var hasAnyActive = existing.Any(m => m.ProviderId == (int)p.ProviderType
+                && m.Version != VersionLogicalDelete);
+            if (hasAnyActive) continue;
+            var hasDecision = existing.Any(m => m.ProviderId == (int)p.ProviderType
+                && m.MappingStatus is SeriesMappingStatus.Blocked
+                    or SeriesMappingStatus.TemporaryIgnored
+                    or SeriesMappingStatus.ForeverIgnored
+                    or SeriesMappingStatus.UserConfirmed
+                    or SeriesMappingStatus.AutoMatched);
+            if (hasDecision || match.Links.Any(l => l.Provider == p.ProviderType)) continue;
+
+            _contributorDb.Metadata.Add(new ContributionMetadataEntity
+            {
+                Id = Guid.NewGuid(),
+                MappingId = mappingId,
+                ProviderId = (int)p.ProviderType,
+                ProviderKey = string.Empty,
+                MappingStatus = SeriesMappingStatus.Unmatched,
+                LinkedDate = null,
+                Version = VersionAddOrUpdate
+            });
+        }
+
+        // 6. Tombstone rows whose (provider,key) is no longer desired and not a preserved decision.
+        //    AutoMatched rows with a real provider key are preserved too: a link that was matched
+        //    by a previous scan (or promoted from the External Mappings page) must not be dropped
+        //    just because this pass didn't re-confirm it — otherwise the match would silently
+        //    revert to Unmatched on the Contribution Mappings page.
+        foreach (var row in existing)
+        {
+            var identity = (row.ProviderId, row.ProviderKey ?? string.Empty);
+            var isDecision = row.MappingStatus is SeriesMappingStatus.Blocked
+                or SeriesMappingStatus.TemporaryIgnored
+                or SeriesMappingStatus.ForeverIgnored
+                or SeriesMappingStatus.UserConfirmed
+                or SeriesMappingStatus.AutoMatched;
+            if (!desired.Contains(identity) && !isDecision && row.Version != VersionLogicalDelete)
+            {
+                _contributorDb.Metadata.Attach(row);
+                row.Version = VersionLogicalDelete;
+                _contributorDb.Entry(row).Property(x => x.Version).IsModified = true;
+            }
+        }
+
+        // 7. Clear expired TemporaryIgnored (re-evaluated this pass to Unmatched).
+        foreach (var row in reEvaluated)
+        {
+            _contributorDb.Metadata.Attach(row);
+            row.MappingStatus = SeriesMappingStatus.Unmatched;
+            row.ProviderKey = string.Empty;
+            row.LinkedDate = null;
+            row.Version = VersionAddOrUpdate;
+            _contributorDb.Entry(row).Property(x => x.MappingStatus).IsModified = true;
+            _contributorDb.Entry(row).Property(x => x.ProviderKey).IsModified = true;
+            _contributorDb.Entry(row).Property(x => x.LinkedDate).IsModified = true;
+            _contributorDb.Entry(row).Property(x => x.Version).IsModified = true;
+        }
+
+        await _contributorDb.SaveChangesAsync(token).ConfigureAwait(false);
+        return match;
+    }
+
+    /// <summary>
+    /// Confirms a manual mapping for a contribution metadata row (upsert, Version = 0).
+    /// Because the pre-existing Unmatched row (ProviderKey = "") for the same provider must not
+    /// survive as an orphan, any OTHER row for this (mapping, provider) is tombstoned, so the
+    /// confirmed (provider, externalId) row is the only active one.
+    /// </summary>
+    public async Task ConfirmAsync(Guid mappingId, ExternalSeriesProvider provider,
+        string externalSeriesId, string? externalSeriesTitle = null, CancellationToken token = default)
+    {
+        var now = DateTime.UtcNow;
+        var allForProvider = await _contributorDb.Metadata
+            .Where(m => m.MappingId == mappingId && m.ProviderId == (int)provider)
+            .ToListAsync(token);
+
+        // The row we will turn into the confirmed match: prefer an existing row with the
+        // SAME external id (idempotent re-confirm), else any active row (rename), else create.
+        var existing = allForProvider.FirstOrDefault(m => m.ProviderKey == externalSeriesId)
+            ?? allForProvider.FirstOrDefault(m => m.Version != VersionLogicalDelete);
+
+        if (existing != null)
+        {
+            // Blocked is id-level: matching a DIFFERENT id is allowed.
+            if (existing.MappingStatus == SeriesMappingStatus.Blocked &&
+                string.Equals(existing.ProviderKey, externalSeriesId, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException(
+                    $"Cannot match mapping {mappingId} to the blocked id '{externalSeriesId}' on {provider}.");
+            }
+            existing.ProviderKey = externalSeriesId;
+            existing.MappingStatus = SeriesMappingStatus.UserConfirmed;
+            existing.LinkedDate = now;
+            existing.Version = VersionAddOrUpdate;
+            _contributorDb.Entry(existing).Property(x => x.ProviderKey).IsModified = true;
+            _contributorDb.Entry(existing).Property(x => x.MappingStatus).IsModified = true;
+            _contributorDb.Entry(existing).Property(x => x.LinkedDate).IsModified = true;
+            _contributorDb.Entry(existing).Property(x => x.Version).IsModified = true;
+        }
+        else
+        {
+            existing = new ContributionMetadataEntity
+            {
+                Id = Guid.NewGuid(),
+                MappingId = mappingId,
+                ProviderId = (int)provider,
+                ProviderKey = externalSeriesId,
+                MappingStatus = SeriesMappingStatus.UserConfirmed,
+                LinkedDate = now,
+                Version = VersionAddOrUpdate
+            };
+            _contributorDb.Metadata.Add(existing);
+        }
+
+        // Tombstone any OTHER rows for this provider (most commonly the Unmatched (ProviderKey="")
+        // row materialized by a scan) so only the confirmed row stays active.
+        foreach (var row in allForProvider)
+        {
+            if (row == existing || row.Version == VersionLogicalDelete)
+                continue;
+            _contributorDb.Metadata.Attach(row);
+            row.Version = VersionLogicalDelete;
+            _contributorDb.Entry(row).Property(x => x.Version).IsModified = true;
+        }
+
+        await _contributorDb.SaveChangesAsync(token).ConfigureAwait(false);
+    }
+
+    /// <summary>Sets a contribution metadata row to Blocked (empty key = hard block; id block retains the key).</summary>
+    public async Task BlockAsync(Guid mappingId, ExternalSeriesProvider provider, CancellationToken token = default)
+    {
+        var existing = await GetRowAsync(mappingId, provider, token);
+        if (existing != null)
+        {
+            existing.MappingStatus = SeriesMappingStatus.Blocked;
+            existing.LinkedDate ??= DateTime.UtcNow;
+            existing.Version = VersionAddOrUpdate;
+        }
+        else
+        {
+            _contributorDb.Metadata.Add(new ContributionMetadataEntity
+            {
+                Id = Guid.NewGuid(),
+                MappingId = mappingId,
+                ProviderId = (int)provider,
+                ProviderKey = string.Empty,
+                MappingStatus = SeriesMappingStatus.Blocked,
+                LinkedDate = DateTime.UtcNow,
+                Version = VersionAddOrUpdate
+            });
+        }
+        await _contributorDb.SaveChangesAsync(token).ConfigureAwait(false);
+    }
+
+    /// <summary>Clears a block / ignore on a contribution metadata row (back to Unmatched).</summary>
+    public async Task UnblockAsync(Guid mappingId, ExternalSeriesProvider provider, CancellationToken token = default)
+    {
+        var existing = await GetRowAsync(mappingId, provider, token);
+        if (existing == null) return;
+        existing.MappingStatus = SeriesMappingStatus.Unmatched;
+        existing.LinkedDate = DateTime.UtcNow;
+        existing.Version = VersionAddOrUpdate;
+        await _contributorDb.SaveChangesAsync(token).ConfigureAwait(false);
+    }
+
+    /// <summary>Applies TemporaryIgnored or ForeverIgnored to a contribution metadata row.</summary>
+    public async Task IgnoreAsync(Guid mappingId, ExternalSeriesProvider provider, bool forever, CancellationToken token = default)
+    {
+        var status = forever ? SeriesMappingStatus.ForeverIgnored : SeriesMappingStatus.TemporaryIgnored;
+        var existing = await GetRowAsync(mappingId, provider, token);
+        if (existing != null)
+        {
+            existing.MappingStatus = status;
+            existing.LinkedDate = DateTime.UtcNow;
+            existing.Version = VersionAddOrUpdate;
+        }
+        else
+        {
+            _contributorDb.Metadata.Add(new ContributionMetadataEntity
+            {
+                Id = Guid.NewGuid(),
+                MappingId = mappingId,
+                ProviderId = (int)provider,
+                ProviderKey = string.Empty,
+                MappingStatus = status,
+                LinkedDate = DateTime.UtcNow,
+                Version = VersionAddOrUpdate
+            });
+        }
+        await _contributorDb.SaveChangesAsync(token).ConfigureAwait(false);
+    }
+
+    /// <summary>Removes a contribution metadata row (tombstoned for replication).</summary>
+    public async Task UnlinkAsync(Guid mappingId, ExternalSeriesProvider provider, CancellationToken token = default)
+    {
+        var existing = await GetRowAsync(mappingId, provider, token);
+        if (existing == null) return;
+        existing.Version = VersionLogicalDelete;
+        await _contributorDb.SaveChangesAsync(token).ConfigureAwait(false);
+    }
+
+    /// <summary>Background scan across all mappings, publishing per-mapping + aggregate SignalR progress.</summary>
+    public async Task ScanAllMappingsAsync(List<IExternalSeriesProvider> providers, CancellationToken token = default)
+    {
+        var mappingIds = await _contributorDb.MappingTitles
+            .Select(mt => mt.MappingId)
+            .Distinct()
+            .ToListAsync(token).ConfigureAwait(false);
+        var total = mappingIds.Count;
+
+        if (_hubReport != null)
+        {
+            await _hubReport.ReportProgressAsync(new ProgressState
+            {
+                Id = LinkAllJobId,
+                JobType = JobType.MetadataLink,
+                ProgressStatus = ProgressStatus.Started,
+                Percentage = 0,
+                Message = $"Linking 0/{total} mappings"
+            });
+        }
+
+        var processed = 0;
+        foreach (var id in mappingIds)
+        {
+            if (token.IsCancellationRequested) break;
+            if (_hubReport != null)
+            {
+                await _hubReport.ReportProgressAsync(new ProgressState
+                {
+                    Id = $"contribution-link-{id}",
+                    JobType = JobType.MetadataLink,
+                    ProgressStatus = ProgressStatus.Started,
+                    Percentage = 0,
+                    Message = "Scanning contribution mapping…"
+                });
+            }
+
+            var match = await ScanMappingAsync(id, providers, token).ConfigureAwait(false);
+            processed++;
+
+            if (_hubReport != null)
+            {
+                var pct = total > 0 ? (processed * 100 / total) : 100;
+                await _hubReport.ReportProgressAsync(new ProgressState
+                {
+                    Id = $"contribution-link-{id}",
+                    JobType = JobType.MetadataLink,
+                    ProgressStatus = ProgressStatus.Completed,
+                    Percentage = 100,
+                    Message = $"{match.Links.Count} linked, {match.Suggestions.Count} suggested"
+                });
+                await _hubReport.ReportProgressAsync(new ProgressState
+                {
+                    Id = LinkAllJobId,
+                    JobType = JobType.MetadataLink,
+                    ProgressStatus = ProgressStatus.InProgress,
+                    Percentage = pct,
+                    Message = $"Linking {processed}/{total} mappings"
+                });
+            }
+        }
+
+        if (_hubReport != null)
+        {
+            await _hubReport.ReportProgressAsync(new ProgressState
+            {
+                Id = LinkAllJobId,
+                JobType = JobType.MetadataLink,
+                ProgressStatus = ProgressStatus.Completed,
+                Percentage = 100,
+                Message = $"Linked {processed}/{total} mappings"
+            });
+        }
+    }
+
+    // ── Internals ──
+
+    private async Task<ContributionMetadataEntity?> GetRowAsync(Guid mappingId, ExternalSeriesProvider provider, CancellationToken token)
+        => await _contributorDb.Metadata
+            .FirstOrDefaultAsync(m => m.MappingId == mappingId && m.ProviderId == (int)provider, token).ConfigureAwait(false);
+
+    private static ContributionMappingSourceDto? ToSourceDto(ContributionSeriesEntity? s)
+    {
+        if (s == null || s.Source == null) return null;
+        var data = s.Data;
+        return new ContributionMappingSourceDto
+        {
+            SourceId = s.SourceId,
+            SourceKey = $"{s.Source.Package}:{s.Source.SourceId}",
+            Package = s.Source.Package,
+            SourceName = s.Source.SourceName,
+            SourceLanguage = s.Source.SourceLanguage,
+            // Per-source title is derived from the mapping's canonical TitleEntity on the group level;
+            // a mirror of the source record lives in the serialized Data payload (not surfaced here).
+            Title = null,
+            ThumbnailUrl = data?.ThumbnailUrl
+        };
+    }
+
+    private static bool IsActiveStatus(SeriesMappingStatus status)
+        => status is SeriesMappingStatus.Unmatched
+            or SeriesMappingStatus.AutoMatched
+            or SeriesMappingStatus.UserConfirmed
+            or SeriesMappingStatus.Blocked
+            or SeriesMappingStatus.TemporaryIgnored
+            or SeriesMappingStatus.ForeverIgnored;
+}

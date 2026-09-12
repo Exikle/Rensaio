@@ -1,0 +1,80 @@
+// 0003 — contribution_snapshot_v1.proto
+// Wire format for the daily `metadata.bin` export.
+//
+// Mirrors RensaioBackend.Services.Contributions.Snapshot.ContributionSnapshotV1
+// and the entity classes in Models/ContributionDatabase. The proto is the single
+// source of truth for serialization; the TS codec in src/proto/ is generated from
+// this file (protoc --js_out / protobufjs) or hand-maintained to match.
+//
+// Field numbers are stable — never renumber. Add new fields as new numbers.
+syntax = "proto3";
+
+package rensaio.contribution.v1;
+
+message ContributionSnapshotV1 {
+  // SchemaVersion — always 1
+  uint32 schema_version = 1;
+
+  // GeneratedUtc — ISO 8601 string
+  string generated_utc = 2;
+
+  // Collection Replication Version Number
+  int32 version = 3;
+
+  repeated TitleEntity titles = 4;
+  repeated MappingTitleEntity mapping_titles = 5;
+  repeated ContributionSourceEntity sources = 6;
+  repeated ContributionSeriesEntity series = 7;
+  repeated ContributionMetadataEntity metadata = 8;
+}
+
+message TitleEntity {
+  string id = 1;   // Guid (MD5 of normalized title) as canonical hex
+  string title = 2;
+  int32 v = 3;     // 0 add/update, -1 delete
+}
+
+message MappingTitleEntity {
+  string mapping_id = 1;
+  string title_id = 2;
+  int32 v = 3;
+}
+
+message ContributionSourceEntity {
+  string id = 1;   // MD5("package:sourceId") as canonical hex
+  string package = 2;
+  int64 source_id = 3;
+  string source_name = 4;
+  string source_language = 5;
+  string last_batch_utc = 6;  // optional
+  int32 v = 7;
+}
+
+message ContributionSeriesEntity {
+  string id = 1;   // MD5("package:sourceId:url") as canonical hex
+  string mapping_id = 2;
+  string source_id = 3;
+  ContributionRecordV1 data = 4;
+  int32 v = 5;
+}
+
+message ContributionRecordV1 {
+  uint32 schema_version = 1;
+  string title_id = 2;
+  string thumbnail_url = 3;  // optional
+  int32 status = 4;
+  bool seen_in_popular = 5;
+  bool seen_in_latest = 6;
+  double last_chapter = 7;   // optional (decimal)
+  string last_update_utc = 8; // optional
+}
+
+message ContributionMetadataEntity {
+  string id = 1;
+  string mapping_id = 2;
+  int32 provider_id = 3;
+  string provider_key = 4;   // optional
+  int32 mapping_status = 5;
+  string linked_date = 6;    // optional
+  int32 v = 7;
+}
