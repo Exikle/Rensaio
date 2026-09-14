@@ -13,9 +13,20 @@ namespace RensaioBackend.Services.Opds;
 /// </summary>
 public class ClientCapabilitiesHelper
 {
-    private static readonly ConcurrentDictionary<string, List<string>> _formatsCache = new();
+    /// <summary>
+    /// Bounds the client-capability caches. Keys are "user-agent:client-ip"; mobile readers
+    /// behind carrier NAT rotate IPs frequently, so the comment "naturally bounded set"
+    /// does not hold in practice — cap and evict oldest-first instead.
+    /// </summary>
+    private static readonly int MaxClientEntries = 1000;
 
-    private static readonly ConcurrentDictionary<string, bool> _supportsProgression = new();
+    /// <summary>Monotonic revision for oldest-first eviction of <see cref="_formatsCache"/>.</summary>
+    private static long _formatsRevision = 0;
+    private static readonly ConcurrentDictionary<string, (long Revision, List<string> Formats)> _formatsCache = new();
+
+    /// <summary>Monotonic revision for oldest-first eviction of <see cref="_supportsProgression"/>.</summary>
+    private static long _progressionRevision = 0;
+    private static readonly ConcurrentDictionary<string, (long Revision, bool Supported)> _supportsProgression = new();
 
     private string[] _supportProgressionClients;
 
@@ -39,7 +50,8 @@ public class ClientCapabilitiesHelper
     public void SetSupportProgression(HttpRequest request, HttpContext httpContext)
     {
         string key = GetClientUserCapabilitiesKey(request, httpContext);
-        _supportsProgression.AddOrUpdate(key, true, (k, v) => true);
+        _supportsProgression[key] = (Interlocked.Increment(ref _progressionRevision), true);
+        TrimProgressionExcess();
     }
 
 
@@ -52,15 +64,20 @@ public class ClientCapabilitiesHelper
         string key = GetClientUserCapabilitiesKey(request, httpContext);
         List<string> formats = request.SupportedImageTypesFromRequest();
 
-        _formatsCache.AddOrUpdate(key, formats, (_, existing) =>
+        var cached = _formatsCache.TryGetValue(key, out var existing) && existing.Formats != null
+            ? existing.Formats
+            : null;
+        if (cached != null &&
+            cached.Count == formats.Count &&
+            cached.OrderBy(x => x).SequenceEqual(formats.OrderBy(x => x)))
         {
-            if (existing.Count != formats.Count ||
-                !existing.OrderBy(x => x).SequenceEqual(formats.OrderBy(x => x)))
-            {
-                return formats;
-            }
-            return existing;
-        });
+            // Unchanged — just touch the entry so it stays fresh.
+            _formatsCache[key] = (Interlocked.Increment(ref _formatsRevision), cached);
+            return;
+        }
+
+        _formatsCache[key] = (Interlocked.Increment(ref _formatsRevision), formats);
+        TrimFormatsExcess();
     }
 
     /// <summary>
@@ -69,7 +86,13 @@ public class ClientCapabilitiesHelper
     public List<string> GetSupportedImageFormats(HttpRequest request, HttpContext httpContext)
     {
         string key = GetClientUserCapabilitiesKey(request, httpContext);
-        return _formatsCache.TryGetValue(key, out var formats) ? formats : [];
+        if (_formatsCache.TryGetValue(key, out var formats))
+        {
+            // Touch so frequently-returning clients stay resident.
+            _formatsCache[key] = (Interlocked.Increment(ref _formatsRevision), formats.Formats);
+            return formats.Formats;
+        }
+        return [];
     }
     public bool SupportProgression(HttpRequest request, HttpContext httpContext)
     {
@@ -79,7 +102,39 @@ public class ClientCapabilitiesHelper
             return true;
         }
         string key = GetClientUserCapabilitiesKey(request, httpContext);
-        return _supportsProgression.TryGetValue(key, out bool res) ? res : false;
+        return _supportsProgression.TryGetValue(key, out var resEntry) ? resEntry.Supported : false;
     }
 
+    /// <summary>
+    /// Evicts the oldest (lowest-revision) entries once the formats cache exceeds the cap.
+    /// </summary>
+    private static void TrimFormatsExcess()
+    {
+        TrimExcess(_formatsCache, kvp => kvp.Value.Item1, MaxClientEntries);
+    }
+
+    /// <summary>
+    /// Evicts the oldest (lowest-revision) entries once the progression cache exceeds the cap.
+    /// </summary>
+    private static void TrimProgressionExcess()
+    {
+        TrimExcess(_supportsProgression, kvp => kvp.Value.Item1, MaxClientEntries);
+    }
+
+    private static void TrimExcess<T>(ConcurrentDictionary<string, T> cache, Func<KeyValuePair<string, T>, long> revisionOf, int max)
+    {
+        int overflow = cache.Count - max;
+        if (overflow <= 0)
+            return;
+
+        var oldest = cache.ToList()
+            .OrderBy(revisionOf)
+            .Take(overflow)
+            .Select(kvp => kvp.Key)
+            .ToList();
+        foreach (string key in oldest)
+        {
+            cache.TryRemove(key, out _);
+        }
+    }
 }

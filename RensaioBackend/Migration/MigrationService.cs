@@ -369,6 +369,13 @@ public class MigrationService
         state.SeriesProviders = migratedProviders;
         await targetDb.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
 
+        // Release every cached extension interop used during migration so the Kotlin
+        // classloaders are not pinned for the remainder of the process.
+        foreach (var ctx in runtimeContexts.Values)
+        {
+            try { ctx.ReleaseInterop(); } catch { }
+        }
+
         _logger.LogInformation("Migrated {Count} series providers into the new database.", migratedProviders.Count);
     }
 
@@ -1161,6 +1168,29 @@ public class MigrationService
         public LegacyProvider Legacy { get; }
 
         private IExtensionInterop? _interop;
+
+        /// <summary>
+        /// Best-effort release of the cached extension interop: releases each underlying source
+        /// so the Kotlin classes/classloader are not pinned for the remainder of the process.
+        /// </summary>
+        public void ReleaseInterop()
+        {
+            var interop = _interop;
+            _interop = null;
+            if (interop == null)
+                return;
+            try
+            {
+                foreach (var s in interop.Sources)
+                {
+                    try { s.Release(); } catch { }
+                }
+            }
+            catch
+            {
+                // best-effort
+            }
+        }
         public async Task<IExtensionInterop?> GetInteropAsync(CancellationToken token = default)
         {
             if (_interop == null)

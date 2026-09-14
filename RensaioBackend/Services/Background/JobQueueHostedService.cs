@@ -23,7 +23,11 @@ namespace RensaioBackend.Services.Background
         private readonly JobsSettings _settings;
         private readonly ConcurrentDictionary<JobQueues, ConcurrentDictionary<string, byte>> _runningJobs = new();
         private readonly object _slotLock = new object();
-        private readonly ConcurrentBag<Task> _inFlightJobTasks = new();
+        // Tracks the in-flight job task so shutdown can drain it. Keyed by a monotonically
+        // increasing id so completed tasks can be removed on every poll cycle — previously
+        // this bag grew by ~2 entries/sec forever because entries were only drained at shutdown.
+        private readonly ConcurrentDictionary<long, Task> _inFlightJobTasks = new();
+        private long _inFlightTaskCounter = 0;
 
         public JobQueueHostedService(IServiceScopeFactory scopeFactory, ILogger<JobQueueHostedService> logger,
             JobsSettings settings)
@@ -71,7 +75,7 @@ namespace RensaioBackend.Services.Background
             // Drain in-flight jobs with a bounded timeout to prevent shutdown hang
             try
             {
-                await Task.WhenAll(_inFlightJobTasks).WaitAsync(TimeSpan.FromSeconds(30)).ConfigureAwait(false);
+                await Task.WhenAll(_inFlightJobTasks.Values).WaitAsync(TimeSpan.FromSeconds(30)).ConfigureAwait(false);
                 _logger.LogInformation("All in-flight jobs completed successfully.");
             }
             catch (TimeoutException)
@@ -136,9 +140,13 @@ namespace RensaioBackend.Services.Background
                 await UpdateJobStatusAsync(job, stoppingToken).ConfigureAwait(false);
                 jobManagement.DetachJob(job);
                 
-                // Track in-flight job task so we can drain on shutdown
+                // Track in-flight job task so we can drain on shutdown. Completed tasks are
+                // removed immediately so the dictionary stays bounded (it previously grew
+                // by ~2 entries/sec for the process lifetime).
                 var jobTask = ExecuteJobAsync(job, queueName, queueSettings, stoppingToken);
-                _inFlightJobTasks.Add(jobTask);
+                long taskId = Interlocked.Increment(ref _inFlightTaskCounter);
+                _inFlightJobTasks[taskId] = jobTask;
+                jobTask.ContinueWith(_ => _inFlightJobTasks.TryRemove(taskId, out _));
             }
         }
 

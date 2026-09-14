@@ -30,6 +30,14 @@ namespace Mihon.ExtensionsBridge.Core.Runtime
         eu.kanade.tachiyomi.source.Source _source;
 
         /// <summary>
+        /// 0 = active, 1 = released. Guards the release transition so Kotlin/JVM state
+        /// is torn down exactly once even if both Dispose and Release are invoked.
+        /// </summary>
+        private readonly object _releaseLock = new();
+
+        private int _released = 0;
+
+        /// <summary>
         /// Cast view of the source as <see cref="eu.kanade.tachiyomi.source.online.HttpSource"/> when supported; otherwise <c>null</c>.
         /// </summary>
         eu.kanade.tachiyomi.source.online.HttpSource? _httpSource => _source as eu.kanade.tachiyomi.source.online.HttpSource;
@@ -488,6 +496,43 @@ namespace Mihon.ExtensionsBridge.Core.Runtime
             var newValue = GetValueFromPreference(pref, value);
             pref.saveNewValue(newValue);
             pref.callChangeListener(newValue);
+        }
+
+        /// <summary>
+        /// Whether this interop has been released. Once true, no further calls against
+        /// the underlying Kotlin source are permitted.
+        /// </summary>
+        public bool Released => Volatile.Read(ref _released) == 1;
+
+        private void EnsureActive()
+        {
+            if (Released)
+                throw new InvalidOperationException("SourceInterop has been released.");
+        }
+
+        /// <summary>
+        /// Drops all strong references to the Kotlin/Java source, its cached preference
+        /// screen and cached filter list. Idempotent; safe to call multiple times.
+        /// Must be called before the extension interop is unloaded: after this returns,
+        /// the underlying Kotlin source instance becomes unreachable from this interop,
+        /// so its defining classloader and jar can be collected.
+        /// </summary>
+        public void Release()
+        {
+            try
+            {
+                if (System.Threading.Interlocked.CompareExchange(ref _released, 1, 0) != 0)
+                    return;
+
+                // Drop Kotlin/JVM state so the classloader + jar can be GC'd.
+                _source = null;
+                _preference = null;
+                _cachedList = null;
+            }
+            catch
+            {
+                // Release is best-effort; never throw during teardown.
+            }
         }
     }
 }

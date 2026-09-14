@@ -107,15 +107,53 @@ namespace RensaioBackend.Services.Bridge
             double jitter = Random.Shared.NextDouble() * 0.5; // up to 500ms
             return TimeSpan.FromSeconds(baseSeconds + jitter);
         }
+        /// <summary>
+        /// Resolves the current group for [keyName] and compares the active entry version
+        /// against a previously cached interop. Returns null when no group matches, so callers
+        /// can decide to evict the stale cache entry and re-resolve.
+        /// </summary>
+        private RepositoryGroup? ResolveActiveGroup(string keyName)
+        {
+            var allLocal = _bridgeManager.LocalExtensionManager.ListExtensions();
+            return allLocal.FirstOrDefault(a => a.Name.Equals(keyName, StringComparison.OrdinalIgnoreCase));
+        }
+
+        /// <summary>
+        /// Returns the cached (or newly created) interop for the given name. When the cached
+        /// interop no longer matches the group's active version, the entry is evicted and
+        /// re-resolved so a previously pinned classloader is never handed out.
+        /// </summary>
         private async Task<IExtensionInterop> GetFromNameAsync(string name, CancellationToken token = default)
         {
-            Lazy<Task<IExtensionInterop>> value = extOps.GetOrAdd(name, (nam) =>
+            var repo = ResolveActiveGroup(name);
+            if (repo == null)
+                EvictExtOp(name);
+
+            string cacheKey = repo?.Name ?? name;
+            Lazy<Task<IExtensionInterop>>? cached = null;
+            if (extOps.TryGetValue(cacheKey, out var candidate))
             {
-                var allLocal = _bridgeManager.LocalExtensionManager.ListExtensions();
-                var repo = allLocal.FirstOrDefault(a => a.Name.Equals(nam, StringComparison.OrdinalIgnoreCase));
-                if (repo == null)
+                var interop = await candidate.Value.ConfigureAwait(false);
+                // Stale-guard: if the active version changed, drop the pin and re-resolve.
+                if (repo != null && interop.Version != repo.GetActiveEntry().Extension.Version)
+                {
+                    EvictExtOp(cacheKey);
+                }
+                else
+                {
+                    return interop;
+                }
+            }
+
+            if (repo == null)
+                throw new InvalidOperationException($"Extension '{name}' not found");
+
+            Lazy<Task<IExtensionInterop>> value = extOps.GetOrAdd(cacheKey, (nam) =>
+            {
+                var fresh = ResolveActiveGroup(nam);
+                if (fresh == null)
                     throw new InvalidOperationException($"Extension '{nam}' not found");
-                return new Lazy<Task<IExtensionInterop>>(_bridgeManager.LocalExtensionManager.GetInteropAsync(repo, token));
+                return new Lazy<Task<IExtensionInterop>>(_bridgeManager.LocalExtensionManager.GetInteropAsync(fresh, token));
             });
             return await value.Value.ConfigureAwait(false);
         }
@@ -127,15 +165,7 @@ namespace RensaioBackend.Services.Bridge
             {
                 throw new InvalidOperationException("Package not found");
             }
-            Lazy<Task<IExtensionInterop>> value = extOps.GetOrAdd(repo.Name, (nam) =>
-            {
-                var allLocal = _bridgeManager.LocalExtensionManager.ListExtensions();
-                var repo = allLocal.FirstOrDefault(a => a.Name.Equals(nam, StringComparison.OrdinalIgnoreCase));
-                if (repo == null)
-                    throw new InvalidOperationException($"Extension '{nam}' not found");
-                return new Lazy<Task<IExtensionInterop>>(_bridgeManager.LocalExtensionManager.GetInteropAsync(repo, token));
-            });
-            return await value.Value.ConfigureAwait(false);
+            return await GetFromNameAsync(repo.Name, token).ConfigureAwait(false);
         }
         private async Task<ISourceInterop> GetFromNameAndSourceAsync(string nameandsource, CancellationToken token = default)
         {
@@ -208,18 +238,54 @@ namespace RensaioBackend.Services.Bridge
             return _bridgeManager.LocalExtensionManager.FindExtension(name);
         }
 
+        /// <summary>
+        /// Drops any cached interop for the group name. Called whenever a mutation invalidates
+        /// a previously resolved interop so the next access re-resolves against fresh state
+        /// instead of returning a pinned, possibly-unloaded interop from <see cref="extOps"/>.
+        /// </summary>
+        private void EvictExtOp(string groupName)
+        {
+            if (string.IsNullOrWhiteSpace(groupName))
+                return;
+            if (extOps.TryRemove(groupName, out var removed))
+            {
+                _logger.LogInformation("Evicted cached interop for extension group {GroupName}.", groupName);
+            }
+        }
+
         public Task<bool> RemoveExtensionAsync(RepositoryGroup group, CancellationToken token = default)
         {
+            // Evict first so a racing in-flight resolve does not re-cache a now-removed group.
+            EvictExtOp(group?.Name);
             return _bridgeManager.LocalExtensionManager.RemoveExtensionAsync(group, token);
         }
 
         public Task<RepositoryGroup?> RemoveExtensionVersionAsync(RepositoryEntry entry, CancellationToken token = default)
         {
-            return _bridgeManager.LocalExtensionManager.RemoveExtensionVersionAsync(entry, token);
+            return Task.Run(() =>
+            {
+                // The entry identifies a group; evict its cached interop so version removal
+                // does not leave a stale interop pinned in extOps.
+                string? groupName = null;
+                try
+                {
+                    var groups = _bridgeManager.LocalExtensionManager.ListExtensions();
+                    var match = groups.FirstOrDefault(g => g.Entries.Any(e => e.Id == entry.Id));
+                    groupName = match?.Name;
+                }
+                catch
+                {
+                    // Fall back to the entry name if the group cannot be resolved.
+                    groupName = entry?.Name;
+                }
+                EvictExtOp(groupName);
+                return _bridgeManager.LocalExtensionManager.RemoveExtensionVersionAsync(entry, token);
+            }, token);
         }
 
         public Task<RepositoryGroup> SetActiveExtensionVersionAsync(RepositoryGroup group, CancellationToken token = default)
         {
+            EvictExtOp(group?.Name);
             return _bridgeManager.LocalExtensionManager.SetActiveExtensionVersionAsync(group, token);
         }
 

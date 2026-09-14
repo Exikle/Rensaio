@@ -21,6 +21,9 @@ namespace Mihon.ExtensionsBridge.Core.Runtime.Gatekeeper
         private int _inFlight = 0;
         private TaskCompletionSource<bool>? _drainTcs;
 
+        /// <summary>Last time any source call entered the gate. Used by the idle sweep.</summary>
+        public DateTime LastAccessUtc { get; private set; } = DateTime.UtcNow;
+
         public string Id => _current.Id;
         public string Name => _current.Name;
 
@@ -46,6 +49,7 @@ namespace Mihon.ExtensionsBridge.Core.Runtime.Gatekeeper
 
         internal async Task EnterAsync(CancellationToken token)
         {
+            LastAccessUtc = DateTime.UtcNow;
             // Fast-path: if open, proceed, else wait for reopen
             while (_isClosed)
             {
@@ -82,7 +86,9 @@ namespace Mihon.ExtensionsBridge.Core.Runtime.Gatekeeper
             var next = _factory(_structure, newEntry, _logger);
             var nextWrapped = WrapSources(next.Sources);
 
-            // Swap
+            // Replace wrapper set BEFORE disposing old so external holders still see a
+            // valid (new) Sources list; the old wrappers are released afterwards.
+            var oldWrapped = _wrappedSources;
             var old = _current;
             _current = next;
             _wrappedSources = nextWrapped;
@@ -90,9 +96,22 @@ namespace Mihon.ExtensionsBridge.Core.Runtime.Gatekeeper
             // Dispose old to unload
             try { old.Dispose(); } catch (Exception ex) { _logger.LogWarning(ex, "Error disposing old extension interop during swap"); }
 
+            // Release old wrappers so they no longer pin the old inner sources/classloader.
+            ReleaseWrappedSources(oldWrapped);
+
             // Reopen gate
             _isClosed = false;
             _drainTcs = null;
+        }
+
+        /// <summary>
+        /// True when no source call has entered the gate for longer than <paramref name="timeout"/>.
+        /// Used by the ExtensionManager idle sweep to unload cold interops (releasing the pinned
+        /// native IKVM classloader + JVM heap).
+        /// </summary>
+        public bool IsIdle(TimeSpan timeout)
+        {
+            return DateTime.UtcNow - LastAccessUtc >= timeout;
         }
 
         internal void Dispose()
@@ -113,7 +132,21 @@ namespace Mihon.ExtensionsBridge.Core.Runtime.Gatekeeper
                 catch { }
                 _current.Dispose();
             }
+            // Release wrappers so they don't pin inner sources after the interop is gone.
+            ReleaseWrappedSources(_wrappedSources);
+            _wrappedSources = null;
             _gate.Dispose();
+        }
+
+        private static void ReleaseWrappedSources(List<ISourceInterop> sources)
+        {
+            if (sources == null)
+                return;
+            foreach (var s in sources.ToArray().Cast<ISourceInterop>())
+            {
+                try { s.Release(); } catch { }
+            }
+            sources.Clear();
         }
 
         public async Task<List<UniquePreference>> LoadPreferencesAsync(CancellationToken token)

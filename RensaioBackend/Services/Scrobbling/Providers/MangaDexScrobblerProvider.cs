@@ -57,7 +57,7 @@ private static readonly TokenBucketRateLimiter _rateLimiter = new(new TokenBucke
     QueueProcessingOrder = QueueProcessingOrder.OldestFirst
 });
 
-private static ConcurrentDictionary<string, decimal> _dedupState = new();
+private static readonly BoundedStringDecimalMap _dedupState = new();
 
 
     public MangaDexScrobblerProvider(
@@ -437,18 +437,13 @@ private static ConcurrentDictionary<string, decimal> _dedupState = new();
     private bool DeDup(string externalSeriesId, decimal chapterNumber)
     {
         string key = GetUserExternalKey(externalSeriesId);
-        if (_dedupState.TryGetValue(key, out decimal result))
-        {
-            if (result == chapterNumber)
-                return true;
-        }
-        return false;
-
+        decimal? result = _dedupState.TryGet(key);
+        return result != null && result == chapterNumber;
     }
     private void UpdateDeDup(string externalSeriesId, decimal chapterNumber)
     {
         string key = GetUserExternalKey(externalSeriesId);
-        _dedupState.AddOrUpdate(key, chapterNumber, (_, existing) => chapterNumber);
+        _dedupState.Set(key, chapterNumber);
     }
     public async Task<bool> SetReadChaptersAsync(string externalSeriesId, Dictionary<decimal, float> chapterState, CancellationToken token = default)
     {

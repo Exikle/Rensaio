@@ -204,39 +204,53 @@ val jarLoaderMap = mutableMapOf<String, URLClassLoader>()
 private val extensionLoaderLogger = androidCompatLogger(AndroidCompatRuntime::class.java)
 
 /**
-    * loads the extension main class called [className] from the jar located at [jarPath]
-    * It may return an instance of HttpSource or SourceFactory depending on the extension.
+    * Loads the extension main class called [className] from the jar located at [jarPath].
+    * Delegates to the single loader path in [Extensions] so every load shares the same
+    * [jarLoaderMap]-managed classloader (no orphaned loaders; unload can close it).
     */
 fun loadExtensionSources(
     jarPath: String,
     className: String,
 ): Any {
-    try {
-        val parentLoader = AndroidCompatRuntime::class.java.classLoader
-        extensionLoaderLogger.debug { "Loader parent=${parentLoader}" }
-
-        val classLoader =
-            jarLoaderMap[jarPath]
-                ?: URLClassLoader(arrayOf<URL>(Path(jarPath).toUri().toURL()), parentLoader)
-        val classToLoad = Class.forName(className, false, classLoader)
-
-        jarLoaderMap[jarPath] = classLoader
-
-        return classToLoad.getDeclaredConstructor().newInstance()
-    } catch (e: Exception) {
-        extensionLoaderLogger.error(e) {
-            "Failed to load $className from $jarPath"
-        }
-        throw e
-    }
+    return Extensions.loadExtension(jarPath, className)
 }
 fun unloadExtension(jarPath: String)
 {
-    if (jarLoaderMap.containsKey(jarPath)) {
-        jarLoaderMap.remove(jarPath)
-        System.gc()
-    }        
+    val loader = synchronized(jarLoaderMap) { jarLoaderMap.remove(jarPath) }
+    if (loader == null) {
+        return
+    }
+    // Best-effort close: releases the jar file handle (Windows needs this before the
+    // file can be moved/deleted) and allows the JVM to release loaded classes.
+    try {
+        loader.close()
+    } catch (e: Throwable) {
+        extensionLoaderLogger.warn(e) { "Error closing classloader for $jarPath" }
+    }
+    // Best-effort GC hint to expedite collection of now-unreferenced classes.
+    System.gc()
 }
+
+/** Closes every registered extension classloader. Called once during host shutdown. */
+fun unloadAllExtensions()
+{
+    val loaders = synchronized(jarLoaderMap) {
+        jarLoaderMap.values.toList().also { jarLoaderMap.clear() }
+    }
+    for (loader in loaders) {
+        try {
+            loader.close()
+        } catch (_: Throwable) {
+            // best-effort
+        }
+    }
+}
+
+/** Test/diagnostic accessor: number of jar paths currently registered. */
+fun extensionLoaderMapSize(): Int = synchronized(jarLoaderMap) { jarLoaderMap.size }
+
+/** Test/diagnostic accessor: whether the given jar path has a registered classloader. */
+fun isExtensionLoaded(jarPath: String): Boolean = synchronized(jarLoaderMap) { jarLoaderMap.containsKey(jarPath) }
 private fun installJulBridge() {
     val logManager = java.util.logging.LogManager.getLogManager()
     val root = java.util.logging.Logger.getLogger("")
@@ -441,6 +455,8 @@ fun applicationShutdown(logger: AndroidCompatLogger) {
     // Stop Android main looper to prevent pending callbacks
     AndroidCompatRuntime.stopMainLooper(timeoutMillis = 5000L)
     CefMessageLoopBridge.stop()
+    // Close every extension classloader so jars are unlocked/releasable at exit.
+    unloadAllExtensions()
     // Unregister sinks and handlers
     AndroidCompatRuntime.unregisterSink()
     AndroidCompatRuntime.restoreDefaultUncaughtHandler()

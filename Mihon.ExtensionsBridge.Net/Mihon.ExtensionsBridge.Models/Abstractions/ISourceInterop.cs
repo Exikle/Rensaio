@@ -26,6 +26,14 @@ namespace Mihon.ExtensionsBridge.Models.Abstractions
         void SetPreference(int position, string value);
         void SetPreference(KeyPreference preference);
         void SetPreferences(IEnumerable<KeyPreference> preferences);
+
+        /// <summary>
+        /// Releases all underlying Kotlin/Java references held by this interop so the
+        /// extension's classloader and jar can be garbage-collected after unloading.
+        /// Implementations must be idempotent and must not throw.
+        /// After <see cref="Release"/> no further calls are permitted.
+        /// </summary>
+        void Release();
     }
 
 }

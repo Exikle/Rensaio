@@ -15,7 +15,10 @@ namespace RensaioBackend.Services.Background
         private readonly IServiceScopeFactory _scopeFactory;
         private readonly ILogger<JobScheduledHostedService> _logger;
         private readonly JobsSettings _settings;
-        private readonly ConcurrentBag<Task> _inFlightSchedulingTasks = new();
+        // Tracks in-flight scheduling tasks so shutdown can drain them. Tasks are removed on
+        // completion — previously the bag grew by one entry per 500ms poll forever because
+        // entries were only drained at shutdown.
+        private readonly List<Task> _inFlightSchedulingTasks = new();
 
         public JobScheduledHostedService(IServiceScopeFactory scopeFactory, ILogger<JobScheduledHostedService> logger,
             JobsSettings settings)
@@ -36,6 +39,9 @@ namespace RensaioBackend.Services.Background
                     var processingTask = ProcessScheduledJobsAsync(stoppingToken);
                     _inFlightSchedulingTasks.Add(processingTask);
                     await processingTask.ConfigureAwait(false);
+                    // Task finished — drop the reference so the list stays bounded instead of
+                    // growing one entry per poll cycle for the process lifetime.
+                    _inFlightSchedulingTasks.Remove(processingTask);
                 }
                 catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
                 {

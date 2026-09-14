@@ -318,6 +318,25 @@ namespace Mihon.ExtensionsBridge.Core.Runtime
 
         public bool Initialized => _initialized;
 
+        /// <summary>
+        /// Delegates to the internal extension manager's idle sweep (see
+        /// <see cref="IInternalExtensionManager.SweepIdleInteropsAsync"/>). No-op until
+        /// initialized — the sweep host (BridgeHost) only calls it after init.
+        /// </summary>
+        public async Task SweepIdleInteropsAsync()
+        {
+            if (!_initialized)
+                return;
+            try
+            {
+                await _internalExtensionsManager.SweepIdleInteropsAsync().ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Interop idle sweep failed (best-effort, continuing).");
+            }
+        }
+
         public void Shutdown()
         {
             try

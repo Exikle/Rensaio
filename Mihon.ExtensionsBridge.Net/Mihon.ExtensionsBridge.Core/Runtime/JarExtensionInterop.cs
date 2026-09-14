@@ -213,6 +213,7 @@ namespace Mihon.ExtensionsBridge.Core.Runtime
                     try { d.Dispose(); } catch { }
                 }
                 _disposables.Clear();
+                ReleaseSources();
                 if (!string.IsNullOrWhiteSpace(_jarPath))
                 {
                     try { extension.bridge.StartupKt.unloadExtension(_jarPath); } catch (System.Exception ex) { _logger.LogWarning(ex, "Error unloading extension classloader"); }
@@ -242,6 +243,8 @@ namespace Mihon.ExtensionsBridge.Core.Runtime
                 }
                 _disposables.Clear();
 
+                ReleaseSources();
+
                 if (!string.IsNullOrWhiteSpace(_jarPath))
                 {
                     try { extension.bridge.StartupKt.unloadExtension(_jarPath); } catch (System.Exception ex) { _logger.LogWarning(ex, "Error unloading extension classloader"); }
@@ -270,6 +273,23 @@ namespace Mihon.ExtensionsBridge.Core.Runtime
             {
                 System.Threading.Interlocked.Exchange(ref _disposeState, 2);
             }
+        }
+
+        /// <summary>
+        /// Releases every wrapped source so the Kotlin source instances become
+        /// unreachable and their defining classloader/jar can be collected.
+        /// Idempotent; safe to call from both ShutdownAsync and Dispose.
+        /// </summary>
+        private void ReleaseSources()
+        {
+            var sources = Volatile.Read(ref _sources);
+            if (sources == null)
+                return;
+            foreach (var s in sources.ToArray().Cast<ISourceInterop>())
+            {
+                try { s.Release(); } catch { }
+            }
+            _sources.Clear();
         }
 
 

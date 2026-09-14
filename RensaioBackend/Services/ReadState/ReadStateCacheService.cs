@@ -9,7 +9,18 @@ namespace RensaioBackend.Services.ReadState;
 /// </summary>
 public class ReadStateCacheService
 {
-    private readonly ConcurrentDictionary<string, List<ChapterReadState>> _cache = new();
+    /// <summary>
+    /// Maximum number of (user, series) entries retained in memory. Bounded so the cache
+    /// cannot grow unboundedly with library size — stale entries are evicted oldest-first
+    /// and will be re-read from disk on the next access.
+    /// </summary>
+    private static readonly int MaxCacheEntries = 5000;
+
+    /// <summary>
+    /// Cache entries with a monotonic revision used for oldest-first eviction.
+    /// </summary>
+    private readonly ConcurrentDictionary<string, (long Revision, List<ChapterReadState> States)> _cache = new();
+    private long _revision = 0;
 
     /// <summary>
     /// Gets cached read states for a user and series.
@@ -18,8 +29,12 @@ public class ReadStateCacheService
     public List<ChapterReadState>? GetCachedReadStates(string username, string seriesStoragePath)
     {
         string key = BuildKey(username, seriesStoragePath);
-        if (_cache.TryGetValue(key, out List<ChapterReadState>? states))
-            return states;
+        if (_cache.TryGetValue(key, out var entry))
+        {
+            // Touch the entry so it counts as most-recent on the next eviction.
+            _cache[key] = (Interlocked.Increment(ref _revision), entry.States);
+            return entry.States;
+        }
         return null;
     }
 
@@ -29,7 +44,8 @@ public class ReadStateCacheService
     public void SetCachedReadStates(string username, string seriesStoragePath, List<ChapterReadState> states)
     {
         string key = BuildKey(username, seriesStoragePath);
-        _cache[key] = states;
+        _cache[key] = (Interlocked.Increment(ref _revision), states);
+        TrimExcess();
     }
 
     /// <summary>
@@ -47,6 +63,29 @@ public class ReadStateCacheService
     public void InvalidateAll()
     {
         _cache.Clear();
+    }
+
+    /// <summary>
+    /// Evicts oldest entries (lowest revision) until the cache is back under the cap.
+    /// Runs on insert; O(N) on overflow only, which is negligible against the disk
+    /// I/O saved by keeping the hot set resident.
+    /// </summary>
+    private void TrimExcess()
+    {
+        int overflow = _cache.Count - MaxCacheEntries;
+        if (overflow <= 0)
+            return;
+
+        // Gather candidates sorted by revision (least-recently-used first).
+        var byRevision = _cache.ToList()
+            .OrderBy(kvp => kvp.Value.Item1)
+            .Take(overflow)
+            .Select(kvp => kvp.Key)
+            .ToList();
+        foreach (string key in byRevision)
+        {
+            _cache.TryRemove(key, out _);
+        }
     }
 
     private static string BuildKey(string username, string seriesStoragePath)

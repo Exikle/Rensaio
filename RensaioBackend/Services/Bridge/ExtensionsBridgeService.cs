@@ -141,19 +141,11 @@ public class ExtensionsBridgeService
         }
         finally
         {
-            if (interop != null)
-            {
-                try
-                {
-                    await interop.ShutdownAsync(token).ConfigureAwait(false);
-                }
-                catch (Exception shutdownEx)
-                {
-                    _logger.LogDebug(shutdownEx, "Interop shutdown failed for package {Package}", packageId);
-                }
-
-                interop.Dispose();
-            }
+            // NOTE: The interop is a SHARED, cached instance owned by ExtensionManager's
+            // InteropCache (and MihonBridgeService.extOps). It must NOT be disposed or
+            // shut down here: doing so releases the Kotlin sources for every other holder
+            // and can pin/break subsequent requests. Lifecycle is managed on group removal,
+            // version swap, or bridge shutdown.
         }
     }
 
@@ -214,19 +206,8 @@ public class ExtensionsBridgeService
         }
         finally
         {
-            if (interop != null)
-            {
-                try
-                {
-                    await interop.ShutdownAsync(token).ConfigureAwait(false);
-                }
-                catch (Exception shutdownEx)
-                {
-                    _logger.LogDebug(shutdownEx, "Interop shutdown failed for extension {Extension}", activeEntry.Extension.Package);
-                }
-
-                interop.Dispose();
-            }
+            // Shared, cached interop — owned by ExtensionManager's InteropCache. Do NOT
+            // dispose/shutdown here or other holders of the same extension break.
         }
     }
 

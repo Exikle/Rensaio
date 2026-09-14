@@ -10,5 +10,7 @@ namespace Mihon.ExtensionsBridge.Core.Abstractions
         RepositoryGroup? FindExtension(RepositoryGroup grp);
         Task CompareOnlineWithLocalAndAutoUpdateAsync(IEnumerable<TachiyomiRepository> onlineRepos, CancellationToken token = default);
         Task ShutdownAsync(CancellationToken token = default);
+        /// <summary>Evicts idle/over-budget extension interops so their native classloaders and JVM heaps can be released.</summary>
+        Task SweepIdleInteropsAsync();
     }
 }

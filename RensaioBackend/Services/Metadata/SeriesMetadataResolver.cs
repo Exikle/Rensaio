@@ -10,10 +10,11 @@ namespace RensaioBackend.Services.Metadata;
 /// external-site names different providers use (AniList "MyAnimeList", Kitsu "myanimelist/manga",
 /// MangaDex "mal", MangaBaka "my_anime_list", ...) to those canonical slugs.
 /// </summary>
-public class SeriesMetadataResolver
+public class SeriesMetadataResolver : IDisposable
 {
     private Stream? _mangaupdates_legacy_map_stream = null;
     private object _readerLock = new object();
+    private bool _disposed = false;
     public SeriesMetadataResolver(IConfiguration config)
     {
         string path = System.IO.Path.Combine(config["runtimeDirectory"]!, "wwwroot");
@@ -28,7 +29,18 @@ public class SeriesMetadataResolver
     }
     ~SeriesMetadataResolver()
     {
-        _mangaupdates_legacy_map_stream?.Dispose();
+        Dispose();
+    }
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true;
+        try
+        {
+            _mangaupdates_legacy_map_stream?.Dispose();
+        }
+        catch { /* best effort */ }
+        _mangaupdates_legacy_map_stream = null;
     }
 
     /// <summary>

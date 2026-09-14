@@ -108,6 +108,9 @@ public class OpdsExtractionCoordinator
 
     /// <summary>
     /// Releases a per-chapter lock acquired via <see cref="AcquireChapterLockAsync"/>.
+    /// Also self-evicts the semaphore from <see cref="_chapterLocks"/> when it is
+    /// unlocked and idle — matching <c>KeyedAsyncLock</c> — so abandoned cache keys do
+    /// not accumulate a permanent semaphore entry for the process lifetime.
     /// </summary>
     private sealed class ChapterLockReleaser : IDisposable
     {
@@ -127,6 +130,20 @@ public class OpdsExtractionCoordinator
         {
             if (_disposed) return;
             _semaphore.Release();
+
+            // Remove the semaphore from the shared dict when no one else is waiting and
+            // it is fully released — a fresh semaphore is cheap to re-create on demand.
+            if (_semaphore.CurrentCount == 1)
+            {
+                lock (_parent._lockDictLock)
+                {
+                    if (_parent._chapterLocks.TryGetValue(_cacheKey, out var current) && current == _semaphore)
+                    {
+                        _parent._chapterLocks.TryRemove(_cacheKey, out _);
+                    }
+                }
+            }
+
             _disposed = true;
         }
     }

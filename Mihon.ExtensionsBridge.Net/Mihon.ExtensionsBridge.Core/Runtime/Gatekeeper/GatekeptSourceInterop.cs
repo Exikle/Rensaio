@@ -9,7 +9,7 @@ namespace Mihon.ExtensionsBridge.Core.Runtime.Gatekeeper
     internal sealed class GatekeptSourceInterop : ISourceInterop
     {
         private readonly GatekeptExtensionInterop _gate;
-        private readonly ISourceInterop _inner;
+        private ISourceInterop _inner;
         private readonly ILogger _logger;
 
         public GatekeptSourceInterop(GatekeptExtensionInterop gate, ISourceInterop inner, ILogger logger)
@@ -19,40 +19,67 @@ namespace Mihon.ExtensionsBridge.Core.Runtime.Gatekeeper
             _logger = logger;
         }
 
-        public long Id => _inner.Id;
-        public bool IsCatalogueSource => _inner.IsCatalogueSource;
-        public bool IsConfigurableSource => _inner.IsConfigurableSource;
-        public bool IsHttpSource => _inner.IsHttpSource;
-        public bool IsParsedHttpSource => _inner.IsParsedHttpSource;
-        public string Language => _inner.Language;
-        public string Name => _inner.Name;
-        public bool SupportsLatest => _inner.SupportsLatest;
+        private ISourceInterop EnsureActive()
+        {
+            var inner = _inner;
+            if (inner == null)
+                throw new InvalidOperationException("GatekeptSourceInterop has been released.");
+            return inner;
+        }
+
+        public long Id => EnsureActive().Id;
+        public bool IsCatalogueSource => EnsureActive().IsCatalogueSource;
+        public bool IsConfigurableSource => EnsureActive().IsConfigurableSource;
+        public bool IsHttpSource => EnsureActive().IsHttpSource;
+        public bool IsParsedHttpSource => EnsureActive().IsParsedHttpSource;
+        public string Language => EnsureActive().Language;
+        public string Name => EnsureActive().Name;
+        public bool SupportsLatest => EnsureActive().SupportsLatest;
 
         public async Task<MangaUpdate> GetDetailsAndChaptersAsync(Manga manga, CancellationToken token = default)
-        { await _gate.EnterAsync(token); try { return await _inner.GetDetailsAndChaptersAsync(manga, token).ConfigureAwait(false); } finally { _gate.Exit(); } }
+        { await _gate.EnterAsync(token); try { return await EnsureActive().GetDetailsAndChaptersAsync(manga, token).ConfigureAwait(false); } finally { _gate.Exit(); } }
         public async Task<List<ParsedChapter>> GetChaptersAsync(Manga manga, CancellationToken token = default)
-        { await _gate.EnterAsync(token); try { return await _inner.GetChaptersAsync(manga, token).ConfigureAwait(false); } finally { _gate.Exit(); } }
+        { await _gate.EnterAsync(token); try { return await EnsureActive().GetChaptersAsync(manga, token).ConfigureAwait(false); } finally { _gate.Exit(); } }
         public async Task<ParsedManga> GetDetailsAsync(Manga manga, CancellationToken token = default)
-        { await _gate.EnterAsync(token); try { return await _inner.GetDetailsAsync(manga, token).ConfigureAwait(false); } finally { _gate.Exit(); } }
+        { await _gate.EnterAsync(token); try { return await EnsureActive().GetDetailsAsync(manga, token).ConfigureAwait(false); } finally { _gate.Exit(); } }
         public async Task<ContentTypeStream> DownloadUrlAsync(string url, CancellationToken token = default)
-        { await _gate.EnterAsync(token); try { return await _inner.DownloadUrlAsync(url, token).ConfigureAwait(false); } finally { _gate.Exit(); } }
+        { await _gate.EnterAsync(token); try { return await EnsureActive().DownloadUrlAsync(url, token).ConfigureAwait(false); } finally { _gate.Exit(); } }
         public async Task<ContentTypeStream> GetPageImageAsync(Page page, CancellationToken token = default)
-        { await _gate.EnterAsync(token); try { return await _inner.GetPageImageAsync(page, token).ConfigureAwait(false); } finally { _gate.Exit(); } }
+        { await _gate.EnterAsync(token); try { return await EnsureActive().GetPageImageAsync(page, token).ConfigureAwait(false); } finally { _gate.Exit(); } }
         public async Task<MangaList> GetLatestAsync(int page, CancellationToken token = default)
-        { await _gate.EnterAsync(token); try { return await _inner.GetLatestAsync(page, token).ConfigureAwait(false); } finally { _gate.Exit(); } }
+        { await _gate.EnterAsync(token); try { return await EnsureActive().GetLatestAsync(page, token).ConfigureAwait(false); } finally { _gate.Exit(); } }
         public async Task<List<Page>> GetPagesAsync(Chapter chapter, CancellationToken token = default)
-        { await _gate.EnterAsync(token); try { return await _inner.GetPagesAsync(chapter, token).ConfigureAwait(false); } finally { _gate.Exit(); } }
+        { await _gate.EnterAsync(token); try { return await EnsureActive().GetPagesAsync(chapter, token).ConfigureAwait(false); } finally { _gate.Exit(); } }
         public async Task<MangaList> GetPopularAsync(int page, CancellationToken token = default)
-        { await _gate.EnterAsync(token); try { return await _inner.GetPopularAsync(page, token).ConfigureAwait(false); } finally { _gate.Exit(); } }
+        { await _gate.EnterAsync(token); try { return await EnsureActive().GetPopularAsync(page, token).ConfigureAwait(false); } finally { _gate.Exit(); } }
         public async Task<MangaList> SearchAsync(int page, string query, CancellationToken token = default)
-        { await _gate.EnterAsync(token); try { return await _inner.SearchAsync(page, query, token).ConfigureAwait(false); } finally { _gate.Exit(); } }
+        { await _gate.EnterAsync(token); try { return await EnsureActive().SearchAsync(page, query, token).ConfigureAwait(false); } finally { _gate.Exit(); } }
         public List<KeyPreference> GetPreferences()
-        { return _inner.GetPreferences(); }
+        { return EnsureActive().GetPreferences(); }
         public void SetPreference(int position, string value)
-        { _inner.SetPreference(position, value); }
+        { EnsureActive().SetPreference(position, value); }
         public void SetPreference(KeyPreference preference)
-        { _inner.SetPreference(preference); }
+        { EnsureActive().SetPreference(preference); }
         public void SetPreferences(IEnumerable<KeyPreference> preferences)
-        { _inner.SetPreferences(preferences); }
+        { EnsureActive().SetPreferences(preferences); }
+
+        /// <summary>
+        /// Releases the wrapped source interop and drops the strong reference to it so
+        /// the wrapper does not keep the extension's Kotlin classloader alive.
+        /// </summary>
+        public void Release()
+        {
+            var inner = _inner;
+            // Detach first so this wrapper no longer pins the inner interop.
+            _inner = null;
+            try
+            {
+                inner?.Release();
+            }
+            catch
+            {
+                // Best-effort teardown.
+            }
+        }
     }
 }

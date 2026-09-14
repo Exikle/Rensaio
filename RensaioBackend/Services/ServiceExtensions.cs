@@ -81,7 +81,10 @@ namespace RensaioBackend.Services
             services.AddScoped<IImageProvider, UrlImageProvider>();
             services.AddScoped<IImageProvider, ExtensionsImageProvider>();
             services.AddScoped<IImageProvider, StorageImageProvider>();
-            services.TryAddScoped<ThumbCacheService>();
+            // Singleton: the bounded URL/ETag caches must be shared across all scoped
+            // consumers (they were previously static — surviving every scope and all
+            // requests — so a single shared instance is both correct and leaner).
+            services.TryAddSingleton<ThumbCacheService>();
             services.AddHttpClient(nameof(ThumbCacheService), SetHttpClientHeaders);
             services.TryAddScoped<IImageFactory, NetVipsImageFactory>();
             services.TryAddScoped<ArchiveHelperService>();
@@ -118,9 +121,6 @@ namespace RensaioBackend.Services
             services.TryAddScoped<Metadata.ExternalMappingSupport>();
             services.TryAddScoped<Metadata.MetadataLinkEngine>();
 
-            // Global metadata repository (in-memory; PR #76 will back it with the snapshot index).
-            services.TryAddScoped<Contributions.Abstractions.IGlobalMetadataRepository, Contributions.InMemoryGlobalMetadataRepository>();
-            services.TryAddScoped<Contributions.InMemoryGlobalMetadataRepository>();
 
             // Register all external provider implementations under the UMBRELLA interface.
             // NOTE: Must use AddScoped (not TryAddScoped) so each provider is registered,

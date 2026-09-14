@@ -35,6 +35,13 @@ namespace Mihon.ExtensionsBridge.Core.Services
     {
         private static readonly TimeSpan InteropIdleTimeout = TimeSpan.FromMinutes(30);
         private const int InteropCacheMaxCount = 32;
+        /// <summary>
+        /// Interval for the background idle sweep that evicts extension interops which have
+        /// been idle beyond <see cref="InteropIdleTimeout"/>. Explicitly wired: the constants
+        /// existed but no sweep ever ran, so cached interops (each pinning a native IKVM
+        /// classloader + JVM heap) stayed resident for the process lifetime.
+        /// </summary>
+        private static readonly TimeSpan InteropSweepInterval = TimeSpan.FromMinutes(5);
 
         /// <summary>
         /// Logger used for operational and diagnostic messages.
@@ -1090,6 +1097,66 @@ namespace Mihon.ExtensionsBridge.Core.Services
             }
 
             await Task.CompletedTask;
+        }
+
+        /// <summary>
+        /// Evicts cached interops that have been idle beyond <see cref="InteropIdleTimeout"/>
+        /// (disposing them so their native IKVM classloader + JVM heap are released), and
+        /// evicts the least-recently-used interops when the cache exceeds
+        /// <see cref="InteropCacheMaxCount"/>. Called periodically by a hosted sweep.
+        /// </summary>
+        public async Task SweepIdleInteropsAsync()
+        {
+            foreach (var key in InteropCache.Keys.ToList())
+            {
+                var interop = InteropCache.TryGetValue(key, out var cached) ? cached : null;
+                if (interop == null)
+                    continue;
+
+                if (interop.IsIdle(InteropIdleTimeout))
+                {
+                    if (InteropCache.TryRemove(key, out var evicted))
+                    {
+                        try
+                        {
+                            evicted.Dispose();
+                            _logger.LogInformation("Evicted idle interop for group {GroupName} (idle > {Timeout} min).",
+                                key?.Name ?? "<null>", InteropIdleTimeout.TotalMinutes);
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogError(ex, "Error disposing idle interop for group {GroupName}.", key?.Name ?? "<null>");
+                        }
+                    }
+                }
+            }
+
+            // Enforce the max-count bound (LRU eviction) even when nothing is idle.
+            int overflow = InteropCache.Count - InteropCacheMaxCount;
+            if (overflow > 0)
+            {
+                var lru = InteropCache.ToList()
+                    .OrderBy(kvp => kvp.Value.LastAccessUtc)
+                    .Take(overflow)
+                    .Select(kvp => kvp.Key)
+                    .ToList();
+                foreach (var key in lru)
+                {
+                    if (InteropCache.TryRemove(key, out var evicted))
+                    {
+                        try
+                        {
+                            evicted.Dispose();
+                            _logger.LogInformation("Evicted least-recently-used interop for group {GroupName} (cache over {Max} entries).",
+                                key?.Name ?? "<null>", InteropCacheMaxCount);
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogError(ex, "Error disposing LRU interop for group {GroupName}.", key?.Name ?? "<null>");
+                        }
+                    }
+                }
+            }
         }
     }
 }

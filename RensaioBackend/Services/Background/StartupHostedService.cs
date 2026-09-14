@@ -186,16 +186,6 @@ namespace RensaioBackend.Services.Background
                 // Path is derived from DefaultConnection (sibling contributor.db).
                 await EnsureContributionDbAsync(_config, cancellationToken).ConfigureAwait(false);
 
-                // (Re)hydrate the in-memory global metadata repository from app-carried mappings.
-                try
-                {
-                    var repo = scope.ServiceProvider.GetRequiredService<Contributions.InMemoryGlobalMetadataRepository>();
-                    await repo.RefreshAsync(cancellationToken).ConfigureAwait(false);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "Failed to initialize the global metadata repository");
-                }
                 //await db.Database.ExecuteSqlRawAsync("PRAGMA busy_timeout=5000;", cancellationToken).ConfigureAwait(false);
                 await _fixes.FixThumbnailsOfSeriesWithMissingThumbnailsAsync(cancellationToken).ConfigureAwait(false);
 
@@ -210,7 +200,9 @@ namespace RensaioBackend.Services.Background
                         p.IsLocal = true;
                     await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
                 }
-                scope.ServiceProvider.GetRequiredService<ReadStateService>().PrefetchCache(await db.Series.ToListAsync(cancellationToken).ConfigureAwait(false));
+                // Read state cache is populated lazily on first OPDS access (bounded LRU) —
+                // eager prefetch of every series×user read state at startup is unnecessary
+                // memory pressure and was removed to keep the memory footprint flat.
 
                 IHostApplicationLifetime lifetime = scope.ServiceProvider.GetRequiredService<IHostApplicationLifetime>();
                 JobManagementService jobManagement = scope.ServiceProvider.GetRequiredService<JobManagementService>();

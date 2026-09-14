@@ -26,8 +26,22 @@ namespace RensaioBackend.Services.Images
         private readonly CacheOptions _options;
         private readonly List<IImageProvider> _imageProviders;
 
-        private readonly static Dictionary<string, string> _urlCache = new Dictionary<string, string>();
-        private readonly static Dictionary<string, EtagCacheEntity> _etagCache = new Dictionary<string,EtagCacheEntity>();
+        // Cache caps: each entry is a short string (URL→key) or ETag entity. Bounded so a
+        // long-lived library scan + OPDS session cannot grow these caches without limit —
+        // previously they were plain static Dictionaries with no eviction at all.
+        private static readonly int UrlCacheMaxEntries = 5000;
+        private static readonly int EtagCacheMaxEntries = 5000;
+
+        // URL → cache-key map with bounded size (LRU-ish: oldest evicted first).
+        // Mutations are always under _urlLock, so a plain non-atomic increment is safe.
+        private readonly static ConcurrentDictionary<string, (long Revision, string Key)> _urlCache = new();
+        private static long _urlRevision = 0;
+
+        // cache-key → entity map with bounded size (LRU-ish: oldest evicted first).
+        // Mutations are always under _eTagLock, so a plain non-atomic increment is safe.
+        private readonly static ConcurrentDictionary<string, (long Revision, EtagCacheEntity Entity)> _etagCache = new();
+        private static long _eTagRevision = 0;
+
         private readonly static SemaphoreSlim _urlLock = new SemaphoreSlim(1);
         private readonly static SemaphoreSlim _eTagLock = new SemaphoreSlim(1);
 
@@ -60,9 +74,10 @@ namespace RensaioBackend.Services.Images
                         _logger.LogWarning("ETag with key {key} not found in cache.", key);
                         return null;
                     }
-                    _etagCache[key] = c;
+                    _etagCache[key] = (++_eTagRevision, c);
+                    TrimEtagCacheExcess();
                 }
-                return _etagCache[key];
+                return _etagCache.TryGetValue(key, out var entry) ? entry.Entity : null;
             }
             finally
             {
@@ -83,9 +98,10 @@ namespace RensaioBackend.Services.Images
                         c = await AddInternalUrlAsync(url, null, token).ConfigureAwait(false);
                     if (c == null)
                         return string.Empty;
-                    _urlCache[url] = c!.Key;
+                    _urlCache[url] = (++_urlRevision, c!.Key);
+                    TrimUrlCacheExcess();
                 }
-                return _urlCache[url];
+                return _urlCache.TryGetValue(url, out var urlEntry) ? urlEntry.Key : string.Empty;
             }
             finally
             {
@@ -131,9 +147,11 @@ namespace RensaioBackend.Services.Images
                         all.Remove(t);
                         continue;
                     }
-                    if (_urlCache.TryGetValue(url, out string k))
+                    if (_urlCache.TryGetValue(url, out var urlEntry))
                     {
-                        t.ThumbnailUrl = prefix + k;
+                        // Touch so frequently-requested URLs stay resident.
+                        _urlCache[url] = (++_urlRevision, urlEntry.Key);
+                        t.ThumbnailUrl = prefix + urlEntry.Key;
                         all.Remove(t);
                     }
                 }
@@ -145,7 +163,7 @@ namespace RensaioBackend.Services.Images
                     List<IThumb> allT = allUrl[m.Url];
                     foreach (IThumb t in allT)
                     {
-                        _urlCache[t.ThumbnailUrl] = m!.Key;
+                        _urlCache[t.ThumbnailUrl] = (++_urlRevision, m!.Key);
                         t.ThumbnailUrl = prefix + m!.Key;
                         all.Remove(t);
                     }
@@ -156,7 +174,7 @@ namespace RensaioBackend.Services.Images
                     EtagCacheEntity? ee = await AddInternalUrlAsync(t.ThumbnailUrl, null, token).ConfigureAwait(false);
                     if (ee == null)
                         continue;
-                    _urlCache[t.ThumbnailUrl] = ee!.Key;
+                    _urlCache[t.ThumbnailUrl] = (++_urlRevision, ee!.Key);
                     t.ThumbnailUrl = prefix + ee!.Key;
                     etags.Add(ee!);
                 }
@@ -173,8 +191,10 @@ namespace RensaioBackend.Services.Images
                     foreach (EtagCacheEntity eee in etags)
                     {
                         if (!_etagCache.ContainsKey(eee.Key))
-                            _etagCache[eee.Key] = eee;
+                            _etagCache[eee.Key] = (++_eTagRevision, eee);
                     }
+                    TrimEtagCacheExcess();
+                    TrimUrlCacheExcess();
                 }
                 finally
                 {
@@ -329,6 +349,48 @@ namespace RensaioBackend.Services.Images
                 contentType = detectedContentType ?? "";
             }
             return (HttpStatusCode.OK, cacheEntry!.Etag, contentType, s);
+        }
+
+        /// <summary>
+        /// Evicts the oldest (lowest-revision) URL→key entries once over the cap.
+        /// Called while holding <see cref="_urlLock"/>.
+        /// </summary>
+        private static void TrimUrlCacheExcess()
+        {
+            int overflow = _urlCache.Count - UrlCacheMaxEntries;
+            if (overflow <= 0)
+                return;
+
+            var oldest = _urlCache.ToList()
+                .OrderBy(kvp => kvp.Value.Item1)
+                .Take(overflow)
+                .Select(kvp => kvp.Key)
+                .ToList();
+            foreach (string key in oldest)
+            {
+                _urlCache.TryRemove(key, out _);
+            }
+        }
+
+        /// <summary>
+        /// Evicts the oldest (lowest-revision) key→entity entries once over the cap.
+        /// Called while holding <see cref="_eTagLock"/>.
+        /// </summary>
+        private static void TrimEtagCacheExcess()
+        {
+            int overflow = _etagCache.Count - EtagCacheMaxEntries;
+            if (overflow <= 0)
+                return;
+
+            var oldest = _etagCache.ToList()
+                .OrderBy(kvp => kvp.Value.Item1)
+                .Take(overflow)
+                .Select(kvp => kvp.Key)
+                .ToList();
+            foreach (string key in oldest)
+            {
+                _etagCache.TryRemove(key, out _);
+            }
         }
     }
 }

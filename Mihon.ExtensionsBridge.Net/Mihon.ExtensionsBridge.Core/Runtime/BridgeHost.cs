@@ -199,6 +199,11 @@ namespace Mihon.ExtensionsBridge.Core.Runtime
             await InitAndroidAppAsync(_folder, _androidLogger, stoppingToken).ConfigureAwait(false);
             await _manager.InitializeAsync(stoppingToken).ConfigureAwait(false);
             _logger.LogInformation("Bridge Host initialized.");
+
+            // Periodic idle sweep for cached extension interops: releases native IKVM
+            // classloaders + JVM heaps for extensions that have been idle >30min (and
+            // enforces the interop cache max count). Runs every 5 minutes, best-effort.
+            var lastSweep = DateTime.UtcNow;
             while (!stoppingToken.IsCancellationRequested)
             {
                 try
@@ -208,6 +213,19 @@ namespace Mihon.ExtensionsBridge.Core.Runtime
                 catch (TaskCanceledException)
                 {
                     // Ignore
+                }
+
+                if (DateTime.UtcNow - lastSweep >= TimeSpan.FromMinutes(5))
+                {
+                    lastSweep = DateTime.UtcNow;
+                    try
+                    {
+                        if (_manager is BridgeManager bridgeManager)
+                        {
+                            await bridgeManager.SweepIdleInteropsAsync().ConfigureAwait(false);
+                        }
+                    }
+                    catch (Exception ex) { _logger.LogWarning(ex, "Interop idle sweep failed (best-effort)."); }
                 }
             }
             _logger.LogInformation("Bridge Host shutting down...");

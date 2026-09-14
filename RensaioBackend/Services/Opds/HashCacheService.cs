@@ -20,15 +20,19 @@ public class HashCacheService
     };
 
     /// <summary>
-    /// In-memory cache of series hash data, keyed by normalized seriesStoragePath.
-    /// Populated on first access, updated on writes.
+    /// Maximum number of series held in the in-memory hash cache. Bounded so a large
+    /// library does not become fully resident; evicted series reload lazily from disk.
     /// </summary>
-    private readonly ConcurrentDictionary<string, SeriesHashCache> _memoryCache = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly int MaxMemoryCacheEntries = 2000;
+
+    /// <summary>Monotonic revision for oldest-first eviction of <see cref="_memoryCache"/>.</summary>
+    private long _memoryRevision = 0;
 
     /// <summary>
-    /// Protects concurrent file reads/writes for the same series hash file.
+    /// In-memory cache of series hash data, keyed by normalized seriesStoragePath.
+    /// Populated on first access, updated on writes. Bounded LRU (oldest evicted first).
     /// </summary>
-    private readonly ConcurrentDictionary<string, SemaphoreSlim> _fileLocks = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, (long Revision, SeriesHashCache Cache)> _memoryCache = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// Initializes the hash cache service.
@@ -204,12 +208,17 @@ public class HashCacheService
         string key = NormalizeSeriesPath(seriesStoragePath);
 
         if (_memoryCache.TryGetValue(key, out var cached))
-            return cached;
+        {
+            // Touch so frequently-read series stay resident (LRU eviction).
+            _memoryCache[key] = (Interlocked.Increment(ref _memoryRevision), cached.Cache);
+            return cached.Cache;
+        }
 
         var fromDisk = LoadSeriesHashCache(seriesStoragePath);
         if (fromDisk != null)
         {
-            _memoryCache[key] = fromDisk;
+            _memoryCache[key] = (Interlocked.Increment(ref _memoryRevision), fromDisk);
+            TrimMemoryCacheExcess();
         }
 
         return fromDisk;
@@ -269,7 +278,29 @@ public class HashCacheService
         File.WriteAllText(tempPath, json);
         File.Move(tempPath, hashPath, overwrite: true);
 
-        // Update memory cache after successful disk write
-        _memoryCache[key] = cache;
+        // Update memory cache after successful disk write (bounded LRU)
+        _memoryCache[key] = (Interlocked.Increment(ref _memoryRevision), cache);
+        TrimMemoryCacheExcess();
+    }
+
+    /// <summary>
+    /// Evicts the oldest (lowest-revision) series entries once the in-memory cache exceeds the
+    /// cap. The hash JSON on disk remains the source of truth; evicted series reload on access.
+    /// </summary>
+    private void TrimMemoryCacheExcess()
+    {
+        int overflow = _memoryCache.Count - MaxMemoryCacheEntries;
+        if (overflow <= 0)
+            return;
+
+        var oldest = _memoryCache.ToList()
+            .OrderBy(kvp => kvp.Value.Item1)
+            .Take(overflow)
+            .Select(kvp => kvp.Key)
+            .ToList();
+        foreach (string key in oldest)
+        {
+            _memoryCache.TryRemove(key, out _);
+        }
     }
 }
