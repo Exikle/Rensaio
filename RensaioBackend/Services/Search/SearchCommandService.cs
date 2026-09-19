@@ -88,10 +88,18 @@ namespace RensaioBackend.Services.Search
                     {
                         var source = await _mihon.SourceFromProviderIdAsync(ls.MihonProviderId!, token).ConfigureAwait(false);
                         Manga m = ls.ToManga()!;
-                        // Bound each source call so a stuck provider can't freeze the import.
-                        var mangaUpdate = await SourceTimeout
-                            .RunAsync(c => source.GetDetailsAndChaptersAsync(m, c), ct)
-                            .ConfigureAwait(false);
+                        string lockKey = source.Id + "|" + m.Url;
+                        // Bound each source call so a stuck provider can't freeze the import, and
+                        // serialize per (provider+manga) so search augmentation can never race the
+                        // provider-wide latest loop (or a library refresh) on the same manga.
+                        MangaUpdate? mangaUpdate = await _mihon.MihonErrorWrapperLockedAsync(
+                            () => SourceTimeout.RunAsync(c => source.GetDetailsAndChaptersAsync(m, c), ct),
+                            "Unable to get details for {Title} from {provider}", lockKey, ls.Title, ls.Provider).ConfigureAwait(false);
+                        if (mangaUpdate == null)
+                        {
+                            sourceErrors.Add(new AugmentSourceErrorDto { Provider = ls.Provider, Title = ls.Title, Reason = "Source call failed while fetching details." });
+                            return;
+                        }
                         var fullData = mangaUpdate.Manga;
                         var chapterData = mangaUpdate.Chapters;
                         if (fullData != null && chapterData != null && chapterData.Count > 0)

@@ -3,11 +3,13 @@ using Mihon.ExtensionsBridge.Models;
 using Mihon.ExtensionsBridge.Models.Abstractions;
 using Microsoft.Extensions.Logging;
 using RensaioBackend.Services.Search;
+using RensaioBackend.Utils;
 using System;
 using System.Collections;
 using System.Collections.Concurrent;
 using System.Linq;
 using System.Net;
+using System.Threading;
 
 namespace RensaioBackend.Services.Bridge
 {
@@ -16,6 +18,16 @@ namespace RensaioBackend.Services.Bridge
         private readonly IBridgeManager _bridgeManager;
         private readonly IWorkingFolderStructure _workingFolderStructure;
         private readonly ILogger _logger;
+
+        /// <summary>
+        /// Serializes source-extension calls on a per-(provider+manga) basis. Some extensions
+        /// (e.g. Madara-based ones) throw <c>IllegalStateException: getMangaUpdate must not be
+        /// called concurrently for same manga</c> when two calls target the same manga at once.
+        /// The global <see cref="SourceTimeoutGate"/> only bounds total concurrency; this keyed
+        /// lock guarantees same-manga calls queue instead of racing. Static because the service
+        /// is scoped — a single lock must be shared across every job scope/worker.
+        /// </summary>
+        private static readonly KeyedAsyncLock PerMangaLock = new();
 
         private ConcurrentDictionary<string, Lazy<Task<IExtensionInterop>>> extOps = [];
         
@@ -41,56 +53,86 @@ namespace RensaioBackend.Services.Bridge
         /// </summary>
         private static readonly TimeSpan RetryBaseDelay = TimeSpan.FromSeconds(2);
 
+        /// <summary>
+        /// Wraps a source-extension call with error handling, retry and the global concurrency
+        /// budget (<see cref="SourceTimeoutGate"/>). See
+        /// <see cref="MihonErrorWrapperLockedAsync"/> for the same-manga-locked variant.
+        /// </summary>
         public async Task<T?> MihonErrorWrapperAsync<T>(Func<Task<T>> func, string errorMessage, params object[] pars) where T : class, new()
+            => await MihonErrorWrapperCoreAsync(func, errorMessage, null, pars).ConfigureAwait(false);
+
+        /// <summary>
+        /// Like <see cref="MihonErrorWrapperAsync"/>, but additionally serializes the call on a
+        /// per-(provider+manga) <paramref name="lockKey"/>. Madara-based sources throw
+        /// "getMangaUpdate must not be called concurrently for same manga" when two extension
+        /// calls target the same manga at once; the global <see cref="SourceTimeoutGate"/> only
+        /// bounds total concurrency, so same-manga calls must queue on this keyed lock instead.
+        /// </summary>
+        public async Task<T?> MihonErrorWrapperLockedAsync<T>(Func<Task<T>> func, string errorMessage, string lockKey, params object[] pars) where T : class, new()
+            => await MihonErrorWrapperCoreAsync(func, errorMessage, lockKey, pars).ConfigureAwait(false);
+
+        private async Task<T?> MihonErrorWrapperCoreAsync<T>(Func<Task<T>> func, string errorMessage, string? lockKey, params object[] pars) where T : class, new()
         {
-            // Global in-flight budget for source-extension calls (see SourceTimeoutGate).
-            // All extension calls (details, chapters, pages, images, latest) flow through here,
-            // so this bounds the total concurrent IKVM-crossing work regardless of how many
-            // parallel loops or downloads are active.
-            for (int attempt = 0; ; attempt++)
+            // Serialize same-manga calls per (provider+manga); non-manga calls (search page,
+            // latest page, images) pass lockKey=null and are only bounded by the global gate.
+            IDisposable? mangaLock = lockKey != null
+                ? await PerMangaLock.LockAsync(lockKey, CancellationToken.None).ConfigureAwait(false)
+                : null;
+            try
             {
-                try
+                // Global in-flight budget for source-extension calls (see SourceTimeoutGate).
+                // All extension calls (details, chapters, pages, images, latest) flow through here,
+                // so this bounds the total concurrent IKVM-crossing work regardless of how many
+                // parallel loops or downloads are active.
+                for (int attempt = 0; ; attempt++)
                 {
-                    using (await SourceTimeoutGate.AcquireAsync(CancellationToken.None).ConfigureAwait(false))
+                    try
                     {
-                        return await func().ConfigureAwait(false);
+                        using (await SourceTimeoutGate.AcquireAsync(CancellationToken.None).ConfigureAwait(false))
+                        {
+                            return await func().ConfigureAwait(false);
+                        }
+                    }
+                    catch (HttpRequestException httpEx)
+                    {
+                        HttpStatusCode status = httpEx.StatusCode ?? HttpStatusCode.InternalServerError;
+
+                        // Retry with exponential backoff on the two transient responses we care about:
+                        //  - TooManyRequests (429): the server explicitly asked us to back off.
+                        //  - NotFound (404): some Cloudflare-protected sources return an empty/404 page
+                        //    when their bot/rate-limit detection triggers.
+                        if (IsRetryableHttpStatus(status) && attempt < DefaultMaxRetries)
+                        {
+                            await Task.Delay(ComputeBackoff(attempt)).ConfigureAwait(false);
+                            continue;
+                        }
+
+                        object[] pars2 = pars.ToArray();
+                        Array.Resize(ref pars2, pars2.Length + 1);
+                        pars2[^1] = status;
+                        _logger.LogError(errorMessage + " Http Error: {httperror}", pars2);
+                        return null;
+                    }
+                    catch (TaskCanceledException)
+                    {
+                        _logger.LogError(errorMessage + " Task was cancelled", pars);
+                        return null;
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        _logger.LogError(errorMessage + " Operation was cancelled", pars);
+                        return null;
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, errorMessage, pars);
+                        return null;
                     }
                 }
-                catch (HttpRequestException httpEx)
-                {
-                    HttpStatusCode status = httpEx.StatusCode ?? HttpStatusCode.InternalServerError;
-
-                    // Retry with exponential backoff on the two transient responses we care about:
-                    //  - TooManyRequests (429): the server explicitly asked us to back off.
-                    //  - NotFound (404): some Cloudflare-protected sources return an empty/404 page
-                    //    when their bot/rate-limit detection triggers.
-                    if (IsRetryableHttpStatus(status) && attempt < DefaultMaxRetries)
-                    {
-                        await Task.Delay(ComputeBackoff(attempt)).ConfigureAwait(false);
-                        continue;
-                    }
-
-                    object[] pars2 = pars.ToArray();
-                    Array.Resize(ref pars2, pars2.Length + 1);
-                    pars2[^1] = status;
-                    _logger.LogError(errorMessage + " Http Error: {httperror}", pars2);
-                    return null;
-                }
-                catch (TaskCanceledException)
-                {
-                    _logger.LogError(errorMessage + " Task was cancelled", pars);
-                    return null;
-                }
-                catch (OperationCanceledException)
-                {
-                    _logger.LogError(errorMessage + " Operation was cancelled", pars);
-                    return null;
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, errorMessage, pars);
-                    return null;
-                }
+            }
+            finally
+            {
+                mangaLock?.Dispose();
             }
         }
 

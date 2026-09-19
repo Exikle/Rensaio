@@ -478,10 +478,15 @@ namespace RensaioBackend.Services.Providers
                         {
                             try
                             {
-                                var refreshed = await _mihon.MihonErrorWrapperAsync(
+                                // Serialize per (provider+manga) to avoid racing another job that
+                                // fetches the same manga concurrently (Madara throws when
+                                // getMangaUpdate is invoked twice on the same manga at once). Key
+                                // uses the canonical source id (see ISourceInterop.Id).
+                                string lockKey = src.Id + "|" + manga.Url;
+                                var refreshed = await _mihon.MihonErrorWrapperLockedAsync(
                                     () => src.GetDetailsAsync(manga, token),
                                     "Unable to refresh Details for Series {Title} from {Provider}",
-                                    provider.Title, provider.Provider).ConfigureAwait(false);
+                                    lockKey, provider.Title, provider.Provider).ConfigureAwait(false);
 
                                 if (refreshed != null)
                                 {
@@ -511,10 +516,11 @@ namespace RensaioBackend.Services.Providers
                             Manga? selected = SelectBestManga(searchResults?.Mangas, provider.Title);
                             if (selected != null)
                             {
-                                var details = await _mihon.MihonErrorWrapperAsync(
+                                string searchLockKey = src.Id + "|" + selected.Url;
+                                var details = await _mihon.MihonErrorWrapperLockedAsync(
                                     () => src.GetDetailsAsync(selected, token),
                                     "Unable to get Details for Series {Title} from {Provider}",
-                                    provider.Title, provider.Provider).ConfigureAwait(false);
+                                    searchLockKey, provider.Title, provider.Provider).ConfigureAwait(false);
 
                                 if (details != null)
                                 {

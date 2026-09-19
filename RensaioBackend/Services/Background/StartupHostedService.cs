@@ -189,6 +189,16 @@ namespace RensaioBackend.Services.Background
                 //await db.Database.ExecuteSqlRawAsync("PRAGMA busy_timeout=5000;", cancellationToken).ConfigureAwait(false);
                 await _fixes.FixThumbnailsOfSeriesWithMissingThumbnailsAsync(cancellationToken).ConfigureAwait(false);
 
+                // Repair any series with an empty Type using genre → categorized-path → Unknown resolution.
+                try
+                {
+                    await _fixes.FixEmptySeriesTypesAsync(cancellationToken).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Startup series Type repair failed");
+                }
+
                 // Fix: Ensure IsLocal = true for all providers without MihonProviderId that aren't Unknown
                 List<SeriesProviderEntity> localProviderFixes = await db.SeriesProviders
                     .Where(a => string.IsNullOrEmpty(a.MihonProviderId) && !a.IsUnknown && !a.IsLocal)
@@ -238,6 +248,18 @@ namespace RensaioBackend.Services.Background
                 // prevents a double-run if the scheduled job already enqueued one.
                 _logger.LogWarning("Starting initial series integrity verification at startup. This may take a while depending on the library size and archive file sizes.");
                 await jobManagement.EnqueueJobAsync(JobType.VerifyAllSeries, (string?)null, Priority.Low, "VerifyAllSeries", null, null, "Default", cancellationToken).ConfigureAwait(false);
+
+                // Repair any wrong auto-linkages created before this version (or by the
+                // contribution import above) so clients converge on the fixed mappings.
+                try
+                {
+                    var repair = scope.ServiceProvider.GetRequiredService<RensaioBackend.Services.Metadata.MappingConflictRepairService>();
+                    await repair.RepairAsync(cancellationToken).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Startup mapping conflict repair failed");
+                }
 
                 _workerCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                 var workerToken = _workerCts.Token;

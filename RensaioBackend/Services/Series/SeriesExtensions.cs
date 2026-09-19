@@ -919,6 +919,91 @@ public static class SeriesExtensions
     }
 
     /// <summary>
+    /// Well-known series types matched against consolidated genres (case-invariant).
+    /// </summary>
+    private static readonly string[] KnownSeriesTypes = { "Manhwa", "Manga", "Manhua" };
+
+    /// <summary>
+    /// Derives the series Type from its consolidated genres and storage path.
+    /// <list type="number">
+    /// <item>If any genre (case-invariant) matches a known type (manhwa/manga/manhua), use it.</item>
+    /// <item>Otherwise, if categorized folders are enabled and the storage path's first path
+    /// segment matches one of the configured categories, use that category.</item>
+    /// <item>Otherwise, "Unknown".</item>
+    /// </list>
+    /// Matching is case-invariant, the result is PascalCased via <see cref="string.ToPascalCase"/>.
+    /// </summary>
+    /// <param name="genres">Consolidated genres (may be null/empty).</param>
+    /// <param name="storagePath">Relative series storage path (first segment is the category when categorized).</param>
+    /// <param name="categorizedFolders">Whether categorized folders are enabled in settings.</param>
+    /// <param name="categories">Configured category names from settings.</param>
+    /// <returns>A PascalCased series type, never null/empty ("Unknown" as fallback).</returns>
+    public static string DeriveSeriesType(this List<string> genres, string? storagePath, bool categorizedFolders, string[]? categories)
+    {
+        // 1) Genre match (case-invariant)
+        if (genres != null)
+        {
+            var normalizedGenres = genres
+                .Where(g => !string.IsNullOrWhiteSpace(g))
+                .Select(g => g.NormalizeGenres())
+                .Where(g => g.Length > 0)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var known in KnownSeriesTypes)
+            {
+                // NormalizeGenres lowercases; compare case-invariantly.
+                if (normalizedGenres.Contains(known.ToLowerInvariant()))
+                {
+                    return known; // already PascalCase
+                }
+            }
+        }
+
+        // 2) Categorized folders: first path segment must match a configured category
+        if (categorizedFolders && !string.IsNullOrWhiteSpace(storagePath))
+        {
+            var firstSegment = storagePath
+                .Replace('\\', '/')
+                .Trim('/')
+                .Split('/', StringSplitOptions.RemoveEmptyEntries)
+                .FirstOrDefault();
+
+            if (!string.IsNullOrEmpty(firstSegment) && categories != null)
+            {
+                foreach (var category in categories)
+                {
+                    if (string.IsNullOrWhiteSpace(category))
+                        continue;
+
+                    if (string.Equals(firstSegment, category, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return category.ToPascalCase();
+                    }
+                }
+            }
+        }
+
+        // 3) Unknown
+        return "Unknown";
+    }
+
+    /// <summary>
+    /// Sets the series <see cref="SeriesEntity.Type"/> (PascalCased) only when it is currently
+    /// empty (null/whitespace), using the series' own consolidated genres and storage path.
+    /// Follows <see cref="DeriveSeriesType"/> resolution rules.
+    /// </summary>
+    public static void EnsureSeriesType(this SeriesEntity series, bool categorizedFolders, string[]? categories)
+    {
+        if (series == null)
+            return;
+
+        if (string.IsNullOrWhiteSpace(series.Type))
+        {
+            series.Type = (series.Genre ?? []).DeriveSeriesType(series.StoragePath, categorizedFolders, categories);
+        }
+    }
+
+    /// <summary>
     /// Populates Pages and PageCount for each chapter in a provider by reading the actual archive files on disk.
     /// This is called after AssignArchives to ensure page data is available immediately,
     /// without requiring a separate VerifyIntegrity pass.

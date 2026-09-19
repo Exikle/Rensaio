@@ -128,6 +128,13 @@ public class EditableSettingsDto
     /// </summary>
     [JsonPropertyName("contributionVerified")]
     public bool ContributionVerified { get; set; } = false;
+
+    /// <summary>
+    /// GitHub repo (owner/repo) holding the daily encrypted export <c>metadata.bin</c>.
+    /// Defaults to "maxpiva/Rensaio-Metadata".
+    /// </summary>
+    [JsonPropertyName("contributionExportRepo")]
+    public string ContributionExportRepo { get; set; } = "maxpiva/Rensaio-Metadata";
 }
 public enum NsfwVisibility
 {

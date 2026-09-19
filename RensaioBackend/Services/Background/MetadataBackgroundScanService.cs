@@ -12,10 +12,13 @@ namespace RensaioBackend.Services.Background;
 /// Background service that reconciles metadata mappings. On each run it links every local series
 /// (and, when the in-memory repository has titles, those titles too) that needs attention, using
 /// the global <see cref="SeriesMappingEntity.MappingStatus"/> / <see cref="SeriesMappingEntity.LinkedDate"/>:
-///   - No global mapping, or one with a stale/empty external id -> link.
-///   - Unmatched / Blocked-with-id (a DIFFERENT id may still be matched) -> link.
+///   - No global mapping (no rows yet) or one with a stale/empty external id -> link.
+///   - Blocked-with-id (a DIFFERENT id may still be matched) -> link.
 ///   - TemporaryIgnored with LinkedDate + 1 month <= now -> re-link and clear.
-///   - ForeverIgnored / hard-blocked (empty-id Blocked) / settled -> skipped (never auto-linked).
+///   - Unmatched (settled — a previous pass already searched; no match found), ForeverIgnored,
+///     hard-blocked (empty-id Blocked) / settled -> skipped (never re-auto-linked).
+///   A series with an active link on one provider and an Unmatched row on another is SKIPPED —
+///   the matched rows stay, the unmatched row stays settled (SRP: scan new work, not repeats).
 /// </summary>
 public sealed class MetadataBackgroundScanService : IWorkerService
 {
@@ -52,7 +55,8 @@ public sealed class MetadataBackgroundScanService : IWorkerService
                 var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
                 var engine = scope.ServiceProvider.GetRequiredService<MetadataLinkEngine>();
                 var repo = scope.ServiceProvider.GetRequiredService<IGlobalMetadataRepository>();
-                await RunOnceAsync(db, engine, repo, stoppingToken).ConfigureAwait(false);
+                var repair = scope.ServiceProvider.GetRequiredService<MappingConflictRepairService>();
+                await RunOnceAsync(db, engine, repo, repair, stoppingToken).ConfigureAwait(false);
             }
         }
         finally
@@ -76,6 +80,9 @@ public sealed class MetadataBackgroundScanService : IWorkerService
                 var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
                 var engine = scope.ServiceProvider.GetRequiredService<MetadataLinkEngine>();
                 await engine.LinkAllAsync(token).ConfigureAwait(false);
+                // NOTE: no post-scan repair. Repair runs only at startup (StartupHostedService)
+                // and via the explicit repair endpoint — a scan must never trigger it, and the
+                // per-provider pending filter already prevents new conflicting claims.
             }
             catch (OperationCanceledException)
             {
@@ -90,7 +97,8 @@ public sealed class MetadataBackgroundScanService : IWorkerService
 
     /// <summary>Runs a single scan pass (usable for manual "scan now" too).</summary>
     public async Task RunOnceAsync(AppDbContext db, MetadataLinkEngine engine,
-        IGlobalMetadataRepository repo, CancellationToken token = default)
+        IGlobalMetadataRepository repo, MappingConflictRepairService? repair = null,
+        CancellationToken token = default)
     {
         var seriesIds = await db.Series.Select(s => s.Id).ToListAsync(token).ConfigureAwait(false);
         var mappings = await db.SeriesMappings.ToListAsync(token).ConfigureAwait(false);
@@ -107,11 +115,12 @@ public sealed class MetadataBackgroundScanService : IWorkerService
         {
             if (token.IsCancellationRequested) break;
 
-            // Only series with pending work are scanned: at least one enabled provider row is
-            // Unmatched, Blocked-with-id (a DIFFERENT id may still be matched), or carries an
-            // expired TemporaryIgnored (which the engine clears + re-evaluates). Settled series
-            // are skipped entirely.
-            if (!engine.SeriesNeedsAttention(seriesId, mappings, enabledProviders, threshold))
+            // Only series with GENUINELY NEW work are scanned by the 24h worker: a never-scanned
+            // (enabled provider with no row) or an expired TemporaryIgnored. Series whose only
+            // pending state is an Unmatched row are SKIPPED — "Unmatched" means a previous scan
+            // already searched and found no match, so re-searching nightly re-triggers the
+            // whole-library storm. That is what the explicit Scan-All / per-series Scan do.
+            if (!HasNewWork(seriesId, mappings, enabledProviders, threshold))
             {
                 skipped++;
                 continue;
@@ -131,5 +140,44 @@ public sealed class MetadataBackgroundScanService : IWorkerService
         var titles = repo.GetAllTitlesAsync(token);
         _logger.LogInformation("Metadata scan pass complete: {Linked} linked, {Skipped} skipped, {Titles} titles in repo",
             linked, skipped, titles.Count);
+
+        // Post-pass repair: detect wrong self-reinforcing linkages and auto-block the losers.
+        if (repair != null)
+        {
+            try
+            {
+                await repair.RepairAsync(token).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Mapping conflict repair after scan failed");
+            }
+        }
+    }
+
+    /// <summary>
+    /// TRUE when the series has a genuinely-new (series, provider) to work on: an enabled provider
+    /// with no mapping row, or an expired TemporaryIgnored. An Unmatched row alone does NOT count as
+    /// new work — a previous pass already searched it; the 24h worker must not re-scan unmatched
+    /// rows every night (only the explicit Scan-All / per-series Scan do that).
+    /// </summary>
+    private static bool HasNewWork(Guid seriesId, List<SeriesMappingEntity> mappings,
+        HashSet<ExternalSeriesProvider> enabledProviders, DateTime threshold)
+    {
+        var seriesMappings = mappings.Where(m => m.SeriesId == seriesId).ToList();
+        var covered = new HashSet<ExternalSeriesProvider>();
+        foreach (var m in seriesMappings)
+        {
+            if (!enabledProviders.Contains(m.Provider)) continue;
+            covered.Add(m.Provider);
+            if (m.MappingStatus == SeriesMappingStatus.TemporaryIgnored
+                && m.LinkedDate != null
+                && m.LinkedDate <= threshold)
+            {
+                return true; // expired ignore → re-evaluate
+            }
+        }
+        // An enabled provider with no row at all = brand-new work.
+        return covered.Count < enabledProviders.Count;
     }
 }

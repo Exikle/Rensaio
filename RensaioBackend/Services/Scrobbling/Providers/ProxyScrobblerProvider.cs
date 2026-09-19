@@ -268,6 +268,11 @@ public abstract class ProxyScrobblerProvider : IScrobblerProvider
     {
         return titles.ToList();
     }
+    
+    public virtual bool CanSearchSeries(List<string> genres, string? category = null)
+    {
+        return true;
+    }
 
     // ── JSON Models ──
 

@@ -770,9 +770,13 @@ public class MigrationService
         if (resolvedManga != null)
         {
             string title = resolvedManga.Title ?? "";
-            var newResolvedManaga = resolvedManga = await _mihon.MihonErrorWrapperAsync(
+            // Serialize per (provider+manga) so migration can't race another job (latest loop,
+            // library refresh, search augmentation) fetching the same manga concurrently. Key
+            // uses the canonical source id (see ISourceInterop.Id) matching all other callers.
+            var resolvedLockKey = sourceInterop.Id + "|" + resolvedManga.Url;
+            var newResolvedManaga = resolvedManga = await _mihon.MihonErrorWrapperLockedAsync(
                                 () => sourceInterop.GetDetailsAsync(resolvedManga, cancellationToken),
-                                "Unable to refresh Details for Series {title} Provider {provider}", title, destination.Provider).ConfigureAwait(false);
+                                "Unable to refresh Details for Series {title} Provider {provider}", resolvedLockKey, title, destination.Provider).ConfigureAwait(false);
             if (newResolvedManaga != null)
                 resolvedManga = newResolvedManaga;
             else if (!fromDb)
@@ -812,12 +816,16 @@ public class MigrationService
             var searchResults = await _mihon.MihonErrorWrapperAsync(
                     () => sourceInterop.SearchAsync(1, legacyProvider.Title, cancellationToken),
                     "Unable to Search for Series {title} Provider {provider}", legacyProvider.Title, legacyProvider.Provider).ConfigureAwait(false);
+            // Lock key: source id + manga url. Consistent per (source, manga) so migration detail
+            // fetches queue behind any concurrent fetch of the same manga (Madara throws on
+            // concurrent getMangaUpdate for the same manga).
             var selection = SelectBestManga(searchResults?.Mangas, legacyProvider.Title);
             if (selection != null)
             {
-                return await _mihon.MihonErrorWrapperAsync(
+                var selectionLockKey = sourceInterop.Id + "|" + selection.Url;
+                return await _mihon.MihonErrorWrapperLockedAsync(
                         () => sourceInterop.GetDetailsAsync(selection, cancellationToken),
-                        "Unable to get Details for Series {title} Provider {provider}", legacyProvider.Title, legacyProvider.Provider).ConfigureAwait(false);
+                        "Unable to get Details for Series {title} Provider {provider}", selectionLockKey, legacyProvider.Title, legacyProvider.Provider).ConfigureAwait(false);
             }
 
             if (searchResults?.Mangas != null && searchResults.Mangas.Count > 1)
@@ -825,9 +833,10 @@ public class MigrationService
                 var fallback = SelectClosestByDistance(searchResults.Mangas, legacyProvider.Title);
                 if (fallback != null)
                 {
-                    return await _mihon.MihonErrorWrapperAsync(
+                    var fallbackLockKey = sourceInterop.Id + "|" + fallback.Url;
+                    return await _mihon.MihonErrorWrapperLockedAsync(
                             () => sourceInterop.GetDetailsAsync(fallback, cancellationToken),
-                            "Unable to get Details for Series {title} Provider {provider}", legacyProvider.Title, legacyProvider.Provider).ConfigureAwait(false);
+                            "Unable to get Details for Series {title} Provider {provider}", fallbackLockKey, legacyProvider.Title, legacyProvider.Provider).ConfigureAwait(false);
                 }
             }
             _logger.LogWarning("Bridge lookup failed for '{Title}' provider {Provider}.", legacyProvider.Title, legacyProvider.Provider);

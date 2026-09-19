@@ -21,6 +21,7 @@ import {
   useContributionMappingsBlock,
   useContributionMappingsUnblock,
   useContributionMappingsIgnore,
+  useContributionMappingsIgnoreAll,
   contributionMappingsQueryKey,
 } from "@/lib/api/hooks/useContributionMappings";
 import { ScrobblerSearchRequester } from '@/components/comp/scrobbler/scrobbler-search-requester';
@@ -90,7 +91,7 @@ export default function ContributionPage() {
     });
   };
 
-  const [filter, setFilter] = useState<'all' | 'unmatched'>('unmatched');
+  const [filter, setFilter] = useState<'all' | 'unmatched' | 'blocked'>('unmatched');
   const [page, setPage] = useState(0);
   const [statusFilter, setStatusFilter] = useState<number | null>(null);
   const [scanProgress, setScanProgress] = useState<string | null>(null);
@@ -112,6 +113,7 @@ export default function ContributionPage() {
   const block = useContributionMappingsBlock();
   const unblock = useContributionMappingsUnblock();
   const ignore = useContributionMappingsIgnore();
+  const ignoreAll = useContributionMappingsIgnoreAll();
 
   // Confirm into the contribution DB via the generic search dialog's onConfirm hook.
   const handleSearchConfirmed = useCallback(() => {
@@ -202,13 +204,14 @@ export default function ContributionPage() {
 
       <div className="flex flex-wrap items-center gap-3">
         {/* Filter combo — left aligned, default Unmatched. */}
-        <Select value={filter} onValueChange={(v) => { setFilter(v as 'all' | 'unmatched'); setPage(0); }}>
+        <Select value={filter} onValueChange={(v) => { setFilter(v as 'all' | 'unmatched' | 'blocked'); setPage(0); }}>
           <SelectTrigger className="w-40">
             <SelectValue placeholder="Unmatched" />
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="unmatched">Unmatched</SelectItem>
             <SelectItem value="all">All</SelectItem>
+            <SelectItem value="blocked">Blocked</SelectItem>
           </SelectContent>
         </Select>
 
@@ -249,6 +252,7 @@ export default function ContributionPage() {
         block={block}
         unblock={unblock}
         ignore={ignore}
+        ignoreAll={ignoreAll}
         mappingScanStates={mappingScanStates}
         onSearch={setSearchTarget}
       />
@@ -301,6 +305,7 @@ interface MappingTableActions {
   block: ReturnType<typeof useContributionMappingsBlock>;
   unblock: ReturnType<typeof useContributionMappingsUnblock>;
   ignore: ReturnType<typeof useContributionMappingsIgnore>;
+  ignoreAll: ReturnType<typeof useContributionMappingsIgnoreAll>;
   mappingScanStates?: Record<string, MappingScanState>;
   onSearch: (target: {
     mappingId: string;
@@ -311,7 +316,7 @@ interface MappingTableActions {
   }) => void;
 }
 
-function MappingTable({ groups, providerMeta, loading, scanMapping, block, unblock, ignore, onSearch, mappingScanStates }: {
+function MappingTable({ groups, providerMeta, loading, scanMapping, block, unblock, ignore, ignoreAll, onSearch, mappingScanStates }: {
   groups: ContributionMappingGroup[];
   providerMeta: ContributionMappingsPage['providerMeta'];
   loading: boolean;
@@ -333,6 +338,7 @@ function MappingTable({ groups, providerMeta, loading, scanMapping, block, unblo
               block={block}
               unblock={unblock}
               ignore={ignore}
+              ignoreAll={ignoreAll}
               mappingScanStates={mappingScanStates}
               onSearch={onSearch}
             />
@@ -345,7 +351,7 @@ function MappingTable({ groups, providerMeta, loading, scanMapping, block, unblo
 }
 
 /** Renders the grouped mapping: title header (with member-source summary + group-level Scan) + a left cover spanning all provider rows. */
-function MappingGroupRows({ group, providerMeta, scanMapping, block, unblock, ignore, onSearch, mappingScanStates }: {
+function MappingGroupRows({ group, providerMeta, scanMapping, block, unblock, ignore, ignoreAll, onSearch, mappingScanStates }: {
   group: ContributionMappingGroup;
   providerMeta: ContributionMappingsPage['providerMeta'];
 } & MappingTableActions) {
@@ -376,6 +382,17 @@ function MappingGroupRows({ group, providerMeta, scanMapping, block, unblock, ig
               variant="outline"
               size="sm"
               className="ml-auto gap-1 shrink-0"
+              onClick={() => ignoreAll.mutate(group.mappingId)}
+              disabled={ignoreAll.isPending}
+              title="Mark every Not matched provider for this mapping as Ignore always"
+            >
+              <EyeOff className="h-3.5 w-3.5" />
+              {ignoreAll.isPending ? 'Ignoring…' : 'Ignore All'}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              className="gap-1 shrink-0"
               onClick={() => scanMapping.mutate(group.mappingId)}
               disabled={isScanning}
               title={

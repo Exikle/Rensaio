@@ -685,22 +685,46 @@ public class OpdsFeedService
     {
         return seriesList.Where(a => a.Sources.Any(b => string.Equals(provider, b.Provider, StringComparison.InvariantCultureIgnoreCase))).ToList();
     }
-    private DateTime LastDateTime(DateTime one, DateTime two)
-    {
-        if (one > two)
-            return one;
-        return two;
-    }
-
-    private List<SeriesEntity> OrderByLastReadOrLastChapter(List<(SeriesEntity Series, List<ChapterReadState> ChaptersReadState)> seriesList)
-    {
-        return seriesList.Where(a=>a.ChaptersReadState!=null && a.ChaptersReadState.Count>0).OrderByDescending(a => LastDateTime(a.ChaptersReadState.Select(b => b.LastReadAt).DefaultIfEmpty(DateTime.MinValue).Max(), a.Series.LastChapterDate ?? DateTime.MinValue)).Select(a => a.Series).ToList();
-    }
-
+    /// <summary>
+    /// Filters series to those "in progress" for a user: series that have at least one
+    /// fully-read chapter AND at least one unread chapter (i.e., neither all read nor all unread).
+    /// Ordered by descending date of the last unread chapter (highest chapter number not completed).
+    /// </summary>
     private List<SeriesEntity> FilterByReading(List<SeriesEntity> seriesList, string username)
     {
         var res = _readStateService.GetUserSeriesReadStates(username, seriesList);
-        return OrderByLastReadOrLastChapter(res);
+
+        return res
+            .Where(a => a.ChaptersReadState != null)
+            .Select(a =>
+            {
+                var completedNumbers = a.ChaptersReadState
+                    .Where(rs => rs.IsCompleted)
+                    .Select(rs => rs.ChapterNumber)
+                    .ToHashSet();
+
+                var allChapters = a.Series.Sources
+                    .SelectMany(s => s.Chapters)
+                    .Where(c => c.ChapterNumber.HasValue)
+                    .GroupBy(c => c.ChapterNumber!.Value)
+                    .Select(g => g.First())
+                    .ToList();
+
+                var lastUnread = allChapters
+                    .Where(c => !completedNumbers.Contains(c.ChapterNumber!.Value))
+                    .OrderByDescending(c => c.ChapterNumber)
+                    .FirstOrDefault();
+
+                return (Series: a.Series,
+                        HasReadChapters: allChapters.Any(c => completedNumbers.Contains(c.ChapterNumber!.Value)),
+                        LastUnread: lastUnread);
+            })
+            // Keep series with both completed and unread chapters (not all read, not all unread)
+            .Where(a => a.HasReadChapters && a.LastUnread != null)
+            // Order by descending date of the last chapter that is unread
+            .OrderByDescending(a => (a.LastUnread!.DownloadDate ?? a.LastUnread.ProviderUploadDate) ?? DateTime.MinValue)
+            .Select(a => a.Series)
+            .ToList();
     }
     private List<SeriesEntity> FilterByLast(List<SeriesEntity> seriesList)
     {

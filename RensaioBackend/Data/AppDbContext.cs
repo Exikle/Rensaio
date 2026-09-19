@@ -77,8 +77,14 @@ namespace RensaioBackend.Data
                 // LinkedSitesIds: comma-separated "site:id" strings in a TEXT column
                 entity.Property(m => m.LinkedSitesIds).HasStringSplit();
                 // AlternativeTitles: JSON-encoded string[] in a TEXT column
-                entity.Property(m => m.AlternativeTitles).HasJsonConversion<List<string>>(); 
+                entity.Property(m => m.AlternativeTitles).HasJsonConversion<List<string>>();
                 entity.HasIndex(m => new { m.SeriesId, m.Provider }).IsUnique().HasDatabaseName("IX_SeriesMapping_SeriesId_Provider");
+                // Deleting a series cascades to its global mappings: a mapping linked to a
+                // removed local series is meaningless, and series-less/decision rows
+                // (SeriesId == null) are untouched by the cascade. Restores the ON DELETE
+                // CASCADE that the original AddSeriesMappingsTable migration declared but
+                // DropUserSeriesMappingsAddSeriesCoverUrl silently dropped.
+                entity.HasOne(m => m.Series).WithMany().HasForeignKey(m => m.SeriesId).OnDelete(DeleteBehavior.Cascade);
             });
 
             modelBuilder.Entity<SeriesProviderEntity>(entity =>
@@ -304,6 +310,9 @@ namespace RensaioBackend.Data
                 entity.Property(m => m.UserRole).IsRequired().HasConversion<int>();
                 entity.Property(m => m.UpdateDate).IsRequired();
                 entity.HasIndex(m => new { m.SeriesId, m.Provider }).IsUnique().HasDatabaseName("IX_SeriesMapping_SeriesId_Provider");
+                // Non-unique: enables the mapping-conflict repair pass + ownership guard to find
+                // every series claiming a given (Provider, ExternalSeriesId) quickly.
+                entity.HasIndex(m => new { m.Provider, m.ExternalSeriesId }).HasDatabaseName("IX_SeriesMapping_Provider_ExternalSeriesId");
             });
         }
     }

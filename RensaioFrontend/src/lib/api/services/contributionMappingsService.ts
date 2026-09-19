@@ -11,7 +11,7 @@ const BASE = '/api/contribution-mappings';
 
 export const contributionMappingsService = {
   async list(params: {
-    filter?: 'all' | 'unmatched';
+    filter?: 'all' | 'unmatched' | 'blocked';
     page?: number;
     pageSize?: number;
     status?: SeriesMappingStatus | null;
@@ -53,6 +53,10 @@ export const contributionMappingsService = {
 
   async ignoreMapping(mappingId: string, provider: string, forever: boolean): Promise<{ message: string }> {
     return apiClient.post<{ message: string }>(`${BASE}/mappings/${mappingId}/${provider}/ignore`, { forever });
+  },
+
+  async ignoreAllUnmatched(mappingId: string): Promise<{ message: string }> {
+    return apiClient.post<{ message: string }>(`${BASE}/mappings/${mappingId}/ignore-all`);
   },
 
   async unlinkMapping(mappingId: string, provider: string): Promise<{ message: string }> {

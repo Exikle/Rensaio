@@ -99,8 +99,9 @@ export interface Metadata {
  */
 export interface Replication {
   id: number;       // always 1
-  version: number;  // current Replication Version Number (bumped daily)
+  version: number;  // current Replication Version Number (bumped on export)
   bumped_at: string;
+  pending_changes: number; // 0/1 — set when changes are uploaded, cleared on export
 }
 
 /**

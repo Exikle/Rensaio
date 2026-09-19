@@ -285,6 +285,11 @@ public class BangumiMetadataProvider : IExternalSeriesProvider
             _ => null
         };
 
+    public bool CanSearchSeries(List<string> genres, string? category = null)
+    {
+        return true;
+    }
+
     // ── JSON models (provider-native) ──
 
     private class BangumiSearchRequest

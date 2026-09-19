@@ -381,6 +381,7 @@ namespace RensaioBackend.Services.Settings
                 ContributionEnabled = settings.ContributionEnabled,
                 ContributionServerUrl = settings.ContributionServerUrl,
                 ContributionContributorId = settings.ContributionContributorId,
+                ContributionExportRepo = settings.ContributionExportRepo,
                 // Server-computed — preserve the currently stored verified state. The
                 // client payload can never flip this flag; only an actual verification
                 // round-trip against the contribution worker may set it.
@@ -455,6 +456,22 @@ namespace RensaioBackend.Services.Settings
             }
         }
 
+        /// <summary>Reads a single key-value setting, or null when absent.</summary>
+        public async Task<string?> GetSettingValueAsync(string name, CancellationToken token = default)
+        {
+            return await _db.Settings.AsNoTracking()
+                .Where(s => s.Name == name)
+                .Select(s => s.Value)
+                .FirstOrDefaultAsync(token)
+                .ConfigureAwait(false);
+        }
+
+        /// <summary>Writes a single key-value setting (upsert; no schema change).</summary>
+        public async Task SetSettingValueAsync(string name, string value, CancellationToken token = default)
+        {
+            await UpsertSettingAsync(name, value, token).ConfigureAwait(false);
+        }
+
         public SettingsDto GetFromEditableSettings(EditableSettingsDto ed)
         {
             SettingsDto set = new SettingsDto
@@ -501,6 +518,7 @@ namespace RensaioBackend.Services.Settings
                 ContributionEnabled = ed.ContributionEnabled,
                 ContributionServerUrl = ed.ContributionServerUrl,
                 ContributionContributorId = ed.ContributionContributorId,
+                ContributionExportRepo = ed.ContributionExportRepo,
                 ContributionVerified = ed.ContributionVerified,
             };
             set.StorageFolder = _config["StorageFolder"] ?? string.Empty;

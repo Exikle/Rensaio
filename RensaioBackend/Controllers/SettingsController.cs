@@ -9,6 +9,7 @@ using RensaioBackend.Services.Settings;
 using RensaioBackend.Models.Dto;
 using RensaioBackend.Models.Enums;
 using RensaioBackend.Services.Auth;
+using RensaioBackend.Services.Contributions;
 using Microsoft.EntityFrameworkCore;
 
 namespace RensaioBackend.Controllers
@@ -38,17 +39,20 @@ namespace RensaioBackend.Controllers
         private readonly AppDbContext _db;
         private readonly UserInviteService _userInviteService;
         private readonly ILogger<SettingsController> _logger;
+        private readonly ContributionPropagationService _contributionPropagation;
 
         public SettingsController(
             SettingsService settingsService,
             AppDbContext db,
             UserInviteService userInviteService,
-            ILogger<SettingsController> logger)
+            ILogger<SettingsController> logger,
+            ContributionPropagationService contributionPropagation)
         {
             _settingsService = settingsService;
             _db = db;
             _userInviteService = userInviteService;
             _logger = logger;
+            _contributionPropagation = contributionPropagation;
         }
 
         /// <summary>
@@ -147,6 +151,9 @@ namespace RensaioBackend.Controllers
                         StringComparison.OrdinalIgnoreCase);
                     bool wasVerified = currentSettings.ContributionVerified;
 
+                    _logger.LogInformation("Contribution settings save: enabled={Enabled}, contributor={Contributor}, idChanged={IdChanged}, serverChanged={ServerChanged}, wasVerified={WasVerified}",
+                        settings.ContributionEnabled, settings.ContributionContributorId, idChanged, serverChanged, wasVerified);
+
                     // Re-verify when the contributor Id or server URL changed, or when
                     // the stored flag is stale (e.g. the contributor was banned upstream).
                     if (idChanged || serverChanged || !wasVerified)
@@ -156,6 +163,9 @@ namespace RensaioBackend.Controllers
                             settings.ContributionContributorId,
                             token).ConfigureAwait(false);
 
+                        _logger.LogInformation("Contribution verification result: verified={Verified}, error={Error}",
+                            verification.Verified, verification.Error);
+
                         // Persist flag + id + server URL together so a settings refetch
                         // right after verification keeps the typed Contributor Id.
                         await _settingsService.SetContributionVerifiedAsync(
@@ -164,19 +174,42 @@ namespace RensaioBackend.Controllers
                             settings.ContributionContributorId,
                             settings.ContributionServerUrl).ConfigureAwait(false);
 
+                        // Every time verification SUCCEEDS (incl. the very first enable / a flag
+                        // that was stale/disabled): migrate the whole SeriesMappings graph into the
+                        // contribution database so mappings participate in cloud contribution sync.
+                        // Propagation is idempotent (ADD/UPDATE = Version 0, identical rows are left
+                        // untouched), so re-running on every successful verify is safe and guarantees
+                        // the trigger can never be missed due to caching/flag-ordering edge cases.
+                        if (verification.Verified)
+                        {
+                            _logger.LogInformation("Contribution verified — triggering full SeriesMappings → contributor.db migration.");
+                            await _contributionPropagation.SyncAllSeriesAsync(token).ConfigureAwait(false);
+                        }
+                        else
+                        {
+                            _logger.LogInformation("Contribution NOT verified — skipping full migration.");
+                        }
+
                         if (!verification.Verified)
                         {
                             response.Message = verification.Error ?? "Contributor Id could not be verified.";
                         }
                     }
+                    else
+                    {
+                        _logger.LogInformation("Contribution settings unchanged (id/server same, already verified) — no re-verify needed.");
+                    }
                 }
                 else
                 {
                     // Contribution is off, or no Contributor Id — nothing can be verified.
-                    if (currentSettings.ContributionVerified)
-                    {
-                        await _settingsService.SetContributionVerifiedAsync(false, token).ConfigureAwait(false);
-                    }
+                    // ALWAYS clear the verified flag (persisted + in-memory cache): if it only
+                    // cleared when the cached value was true, disabling + re-enabling could leave a
+                    // stale cached "verified=true" and the next enable+save would take the
+                    // "unchanged — already verified" branch, never re-verifying nor triggering the
+                    // full SeriesMappings migration. Unconditional clearing guarantees the flag
+                    // reflects reality after every save.
+                    await _settingsService.SetContributionVerifiedAsync(false, token).ConfigureAwait(false);
                 }
 
                 // If auth is being enabled now (was disabled before), check if current user needs a password

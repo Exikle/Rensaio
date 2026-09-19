@@ -3,6 +3,7 @@ using RensaioBackend.Extensions;
 using RensaioBackend.Models.Database;
 using RensaioBackend.Models.Dto;
 using RensaioBackend.Services.Images;
+using RensaioBackend.Services.Series;
 using RensaioBackend.Services.Settings;
 using Microsoft.EntityFrameworkCore;
 
@@ -14,14 +15,42 @@ namespace RensaioBackend.Services.Helpers
         private readonly AppDbContext _db;
         private readonly SettingsService _settingsService;
         private readonly ThumbCacheService _thumbs;
+        private readonly ILogger<NouisanceFixer20ExtraLarge> _logger;
 
-        public NouisanceFixer20ExtraLarge(AppDbContext db, SettingsService settingsService, ThumbCacheService thumbs)
+        public NouisanceFixer20ExtraLarge(AppDbContext db, SettingsService settingsService, ThumbCacheService thumbs,
+            ILogger<NouisanceFixer20ExtraLarge> logger)
         {
             _db = db;
             _settingsService = settingsService;
             _thumbs = thumbs;
+            _logger = logger;
         }
 
+
+
+        public async Task FixEmptySeriesTypesAsync(CancellationToken token)
+        {
+            SettingsDto settings = await _settingsService.GetSettingsAsync(token).ConfigureAwait(false);
+            List<SeriesEntity> missingTypes = await _db.Series
+                .Where(s => s.Type == null || s.Type == "")
+                .ToListAsync(token)
+                .ConfigureAwait(false);
+
+            if (missingTypes.Count == 0)
+            {
+                return;
+            }
+
+            int fixedCount = 0;
+            foreach (SeriesEntity series in missingTypes)
+            {
+                series.EnsureSeriesType(settings.CategorizedFolders, settings.Categories);
+                fixedCount++;
+            }
+
+            await _db.SaveChangesAsync(token).ConfigureAwait(false);
+            _logger.LogInformation("Fixed series Type for {Count} series with empty types", fixedCount);
+        }
 
 
         public async Task FixThumbnailsOfSeriesWithMissingThumbnailsAsync(CancellationToken token)

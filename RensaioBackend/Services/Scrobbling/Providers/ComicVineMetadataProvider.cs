@@ -29,7 +29,7 @@ public class ComicVineMetadataProvider : IExternalSeriesProvider
     public string? Icon => ProviderIcons.ComicVine;
     public string? Link => "https://comicvine.gamespot.com/api/";
     public string? LinkDescription => "Get API Key";
-    public string? SeriesUrlTemplate => "https://comicvine.gamespot.com/issue/{0}/";
+    public string? SeriesUrlTemplate => "https://comicvine.gamespot.com/issue/4050-{0}/";
     public string? ImageTemplateUrl => null;
     public bool RequiresOAuth => false;
     public bool SupportsDirectAuth => false;
@@ -169,6 +169,13 @@ public class ComicVineMetadataProvider : IExternalSeriesProvider
     public List<string> FilterLookupTitles(IEnumerable<string> titles)
     {
         return [];
+    }
+    private static string[] NoCategories = ["manhwa", "manga", "manhua"];
+    public bool CanSearchSeries(List<string> genres, string? category = null)
+    {
+        if (category != null && NoCategories.Contains(category.ToLowerInvariant())) return false;
+        if (genres != null && genres.Any(g => NoCategories.Contains(g.ToLowerInvariant()))) return false;
+        return true;
     }
 
     // ── JSON Models ──

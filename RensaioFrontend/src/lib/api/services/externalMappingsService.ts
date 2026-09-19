@@ -12,7 +12,7 @@ const BASE = '/api/external-mappings';
 export const externalMappingsService = {
   // Optionally apply a consistent envelope: our backend returns the page DTO directly.
   async list(params: {
-    filter?: 'all' | 'unmatched';
+    filter?: 'all' | 'unmatched' | 'blocked';
     page?: number;
     pageSize?: number;
     status?: SeriesMappingStatus | null;
@@ -48,6 +48,10 @@ export const externalMappingsService = {
 
   async ignoreSeries(seriesId: string, provider: string, forever: boolean): Promise<{ message: string }> {
     return apiClient.post<{ message: string }>(`${BASE}/series/${seriesId}/${provider}/ignore`, { forever });
+  },
+
+  async ignoreAllUnmatched(seriesId: string): Promise<{ message: string }> {
+    return apiClient.post<{ message: string }>(`${BASE}/series/${seriesId}/ignore-all`);
   },
 
   async scanAll(): Promise<{ message: string }> {

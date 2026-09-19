@@ -3,6 +3,7 @@ using RensaioBackend.Models;
 using RensaioBackend.Services.Images;
 using RensaioBackend.Services.Settings;
 using RensaioBackend.Extensions;
+using RensaioBackend.Models.ContributionDatabase;
 using RensaioBackend.Models.Database;
 using RensaioBackend.Models.Dto;
 using RensaioBackend.Models.Enums;
@@ -24,6 +25,7 @@ namespace RensaioBackend.Services.Scrobbling;
 public class SeriesMatchingService
 {
     private readonly AppDbContext _db;
+    private readonly ContributionDbContext _contributorDb;
     private readonly ExternalSeriesProviderFactory _providerFactory;
     private readonly TitleMatcher _titleMatcher;
     private readonly SeriesStateService _seriesStateService;
@@ -36,6 +38,7 @@ public class SeriesMatchingService
 
     public SeriesMatchingService(
         AppDbContext db,
+        ContributionDbContext contributorDb,
         ExternalSeriesProviderFactory providerFactory,
         TitleMatcher titleMatcher,
         SeriesStateService seriesStateService,
@@ -46,6 +49,7 @@ public class SeriesMatchingService
         Contributions.ContributionPropagationService contributionSync)
     {
         _db = db;
+        _contributorDb = contributorDb;
         _providerFactory = providerFactory;
         _titleMatcher = titleMatcher;
         _seriesStateService = seriesStateService;
@@ -160,13 +164,40 @@ public class SeriesMatchingService
     {
         var mapping = await _db.SeriesMappings
             .FirstOrDefaultAsync(m => m.SeriesId == seriesId && m.Provider == provider, token);
+        var series = await _db.Series.AsNoTracking()
+            .FirstOrDefaultAsync(s => s.Id == seriesId, token);
 
         // Blocked = id-level rule: you can't match to the blocked id, but you CAN match another id.
+        // EXCEPTION: a REPAIR-created (auto-sealed) id-block is subordinate to an explicit user
+        // choice — the auto-repair guessed this id was wrong (see SeriesMappingEntity.IsAutoSealedBlock),
+        // but the user confirming here knows better, so it is always overridable. A USER-created block
+        // (real LinkedDate) is a deliberate refusal and still refuses the confirm — unless the block
+        // holder is a legitimately-distinct SAME-TITLE / DIFFERENT-CATEGORY twin (categorized folders,
+        // different first path segment), the same exception the conflict repair applies.
         if (mapping?.MappingStatus == SeriesMappingStatus.Blocked &&
             string.Equals(mapping.ExternalSeriesId, externalSeriesId, StringComparison.OrdinalIgnoreCase))
         {
-            throw new InvalidOperationException(
-                $"Cannot match series {seriesId} to the blocked id '{externalSeriesId}' on {provider}.");
+            bool overridable = mapping.IsAutoSealedBlock
+               || (series != null
+                   && await IsSameTitleDifferentCategoryOwnerAsync(series, provider, externalSeriesId, token));
+            if (!overridable)
+            {
+                throw new InvalidOperationException(
+                    $"Cannot match series {seriesId} to the blocked id '{externalSeriesId}' on {provider}.");
+            }
+            // The user's explicit choice wins; lift the auto/user block and link.
+            mapping.MappingStatus = SeriesMappingStatus.UserConfirmed;
+            mapping.ExternalSeriesId = externalSeriesId;
+            mapping.ExternalSeriesTitle = externalTitle;
+            mapping.LinkedDate = DateTime.UtcNow;
+            mapping.UpdateDate = DateTime.UtcNow;
+            await _db.SaveChangesAsync(token);
+            await _linkEngine.LinkSeriesAsync(seriesId, token).ConfigureAwait(false);
+            await SyncContributionAsync(seriesId, token).ConfigureAwait(false);
+            _logger.LogDebug("Confirmed match (blocked {BlockKind}) series {SeriesId} provider {Provider} -> {ExternalId}",
+                mapping.IsAutoSealedBlock ? "auto" : "user",
+                seriesId, provider, externalSeriesId);
+            return;
         }
         var now = DateTime.UtcNow;
         if (mapping != null)
@@ -206,6 +237,64 @@ public class SeriesMatchingService
         await SyncContributionAsync(seriesId, token).ConfigureAwait(false);
 
         _logger.LogDebug("Confirmed match series {SeriesId} provider {Provider} -> {ExternalId}", seriesId, provider, externalSeriesId);
+    }
+
+    /// <summary>
+    /// True when a series with an active claim to <paramref name="externalSeriesId"/> on
+    /// <paramref name="provider"/> is a legitimately-distinct twin of <paramref name="series"/>:
+    /// same normalized title AND different first storage-path segment (different category folder).
+    /// Mirrors MappingConflictRepairService's category-aware exception so a stale auto-block on a
+    /// same-title/different-category twin never prevents a manual confirmation.
+    /// </summary>
+    private async Task<bool> IsSameTitleDifferentCategoryOwnerAsync(
+        SeriesEntity series, ExternalSeriesProvider provider, string externalSeriesId, CancellationToken token)
+    {
+        // EF can't translate string.Equals(…, OrdinalIgnoreCase) in a LINQ filter — compare the
+        // lowercased stored value against the lowercased id (SQL LOWER/==). Status guard is a plain
+        // equality OR (AutoMatched / UserConfirmed are the "active claim" statuses).
+        string lowerId = externalSeriesId.ToLowerInvariant();
+        var ownerId = await _db.SeriesMappings
+            .AsNoTracking()
+            .Where(m => m.SeriesId != series.Id
+                && m.Provider == provider
+                && m.ExternalSeriesId != null
+                && m.ExternalSeriesId.ToLower() == lowerId
+                && (m.MappingStatus == SeriesMappingStatus.AutoMatched
+                    || m.MappingStatus == SeriesMappingStatus.UserConfirmed))
+            .Select(m => m.SeriesId)
+            .FirstOrDefaultAsync(token);
+        if (ownerId == null || ownerId == Guid.Empty) return false;
+
+        var owner = await _db.Series.AsNoTracking()
+            .FirstOrDefaultAsync(s => s.Id == ownerId, token);
+        if (owner == null) return false;
+
+        string ta = NormalizeTitle(series.Title);
+        string tb = NormalizeTitle(owner.Title);
+        if (string.IsNullOrWhiteSpace(ta) || string.IsNullOrWhiteSpace(tb))
+            return false;
+        if (!string.Equals(ta, tb, StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        string ca = FirstPathSegment(series.StoragePath);
+        string cb = FirstPathSegment(owner.StoragePath);
+        return !string.IsNullOrWhiteSpace(ca)
+            && !string.IsNullOrWhiteSpace(cb)
+            && !string.Equals(ca, cb, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string FirstPathSegment(string path)
+    {
+        string p = (path ?? string.Empty).Replace('\\', '/').Trim('/');
+        int idx = p.IndexOf('/');
+        return idx > 0 ? p[..idx] : p;
+    }
+
+    private static string? NormalizeTitle(string? title)
+    {
+        if (string.IsNullOrWhiteSpace(title)) return null;
+        return string.Join(' ', title.Trim().Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))
+            .ToLowerInvariant();
     }
 
     /// <summary>Get all series matching statuses (global mappings) for the user's providers.</summary>
@@ -401,6 +490,31 @@ public class SeriesMatchingService
             return null;
         }
 
+        // CanSearchSeries gate — BEFORE searching this series on this provider, ask the provider
+        // whether the series is searchable at all. Genres come from SeriesEntity.Genre and the
+        // category comes from SeriesEntity.Type. When the provider cannot search this series, the
+        // (series, provider) relation is settled as "ignoredAlways" (ForeverIgnored) so the
+        // provider is never searched for this series again.
+        if (!scrobbler.CanSearchSeries(series.Genre, series.Type))
+        {
+            _logger.LogDebug("Auto-match skipped series {SeriesId} provider {Provider}: CanSearchSeries=false → ignoredAlways",
+                series.Id, provider);
+            await EnsureRelationIgnoredAsync(userId, series.Id, provider, token).ConfigureAwait(false);
+            return null;
+        }
+
+        // Contribution database FIRST match. When the community (contribution) database already
+        // linked THIS series on THIS provider (AutoMatched / UserConfirmed with a provider key),
+        // we USE that hit instead of searching the provider — HIT = no scrobbler/metadata search,
+        // only a metadata fetch when the provider is available (it is, in this auto-match flow).
+        var contributionId = await FindContributionLinkAsync(series, provider, token).ConfigureAwait(false);
+        if (!string.IsNullOrWhiteSpace(contributionId))
+        {
+            _logger.LogDebug("Auto-match series {SeriesId} provider {Provider}: contribution DB hit -> {ExternalId} (no search)",
+                series.Id, provider, contributionId);
+            return await ApplyContributionHitAsync(userId, series, provider, contributionId, token).ConfigureAwait(false);
+        }
+
         var localCandidates = _titleMatcher.BuildTitleCandidates(series);
         var uniqueTitles = localCandidates
             .Where(x => !string.IsNullOrWhiteSpace(x))
@@ -482,6 +596,39 @@ public class SeriesMatchingService
             };
         }
 
+        // CONFLICT GUARD: never auto-link this series to a (provider, externalId) already owned by
+        // a DIFFERENT series (active claim + stronger or equal decision). Refuse and return — the
+        // mapping-conflict repair pass settles deterministically who owns each id.
+        var owner = await Metadata.MappingOwnershipGuard.FindOwnerAsync(_db, provider,
+            bestExternalId, series.Id, token).ConfigureAwait(false);
+        if (owner != null && Metadata.MappingOwnershipGuard.IsStrongerThanNewAutoMatch(owner))
+        {
+            var existingBlocked = await _db.SeriesMappings
+                .FirstOrDefaultAsync(m => m.SeriesId == series.Id && m.Provider == provider, token);
+            // Guard against the bogus-key bug: a "0"/empty bestExternalId means the search produced
+            // no real id — creating a Blocked row with it would be a meaningless hard block that the
+            // startup repair then has to downgrade again. Skip the block entirely when there's no id.
+            if (existingBlocked == null && !string.IsNullOrWhiteSpace(bestExternalId) && bestExternalId != "0")
+            {
+                _db.SeriesMappings.Add(new SeriesMappingEntity
+                {
+                    Id = Guid.NewGuid(),
+                    SeriesId = series.Id,
+                    Provider = provider,
+                    ExternalSeriesId = bestExternalId,
+                    MappingStatus = SeriesMappingStatus.Blocked,
+                    LinkedDate = SeriesMappingEntity.AutoSealedSentinel,
+                    UserRole = UserLevel.User,
+                    UpdateDate = DateTime.UtcNow
+                });
+                await _db.SaveChangesAsync(token);
+                await SyncContributionAsync(series.Id, token);
+            }
+            _logger.LogDebug("Auto-match refused series {SeriesId} provider {Provider} -> {ExternalId}: "
+                + "already owned by series {OwnerSeriesId}", series.Id, provider, bestExternalId, owner.SeriesId);
+            return null;
+        }
+
         var existing = await _db.SeriesMappings
             .FirstOrDefaultAsync(m => m.SeriesId == series.Id && m.Provider == provider, token);
         var now = DateTime.UtcNow;
@@ -549,6 +696,202 @@ public class SeriesMatchingService
             ExternalCoverUrl = bestResult?.CoverUrl,
             MatchScore = bestPercentage / 100.0
         };
+    }
+
+    /// <summary>
+    /// Contribution-DB first match for a single (series, provider) pair. Resolves the local
+    /// series' titles to an existing contribution mapping and returns the provider key when the
+    /// community already linked this series on this provider with an active status.
+    /// A HIT means the provider must NOT be searched — the mapping is adopted directly.
+    /// </summary>
+    private async Task<string?> FindContributionLinkAsync(SeriesEntity series,
+        ExternalSeriesProvider provider, CancellationToken token)
+    {
+        try
+        {
+            var localCandidates = _titleMatcher.BuildTitleCandidates(series)
+                .Where(t => !string.IsNullOrWhiteSpace(t))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            if (localCandidates.Count == 0) return null;
+
+            var titleIds = localCandidates.Select(TitleEntity.DeriveId).Distinct().ToHashSet();
+
+            var mappingTitles = await _contributorDb.MappingTitles
+                .Where(mt => titleIds.Contains(mt.TitleId))
+                .AsNoTracking()
+                .ToListAsync(token).ConfigureAwait(false);
+            if (mappingTitles.Count == 0) return null;
+
+            // Prefer the mapping that links the MAIN title, then the one with the most shared titles.
+            var mainTitleId = TitleEntity.DeriveId(series.Title);
+            var mappingId = mappingTitles
+                .GroupBy(mt => mt.MappingId)
+                .OrderByDescending(g => g.Any(mt => mt.TitleId == mainTitleId) ? 1 : 0)
+                .ThenByDescending(g => g.Count())
+                .First().Key;
+
+            var row = await _contributorDb.Metadata
+                .Where(m => m.MappingId == mappingId
+                    && m.ProviderId == (int)provider
+                    && m.Version >= 0
+                    && !string.IsNullOrWhiteSpace(m.ProviderKey)
+                    && (m.MappingStatus == SeriesMappingStatus.AutoMatched
+                        || m.MappingStatus == SeriesMappingStatus.UserConfirmed))
+                .AsNoTracking()
+                .FirstOrDefaultAsync(token).ConfigureAwait(false);
+
+            return row?.ProviderKey;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Contribution DB first-match failed for series {SeriesId} provider {Provider}",
+                series.Id, provider);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Adopts a contribution-DB hit: persists the (series, provider) mapping as AutoMatched using
+    /// the community-established external id and enriches it with the provider's series metadata
+    /// (cover, alt titles, linked site ids). The provider is available here (this auto-match flow
+    /// only reaches enabled providers), so a metadata fetch is allowed — no search is performed.
+    /// </summary>
+    private async Task<SeriesMatchStatusDto?> ApplyContributionHitAsync(Guid userId, SeriesEntity series,
+        ExternalSeriesProvider provider, string externalId, CancellationToken token)
+    {
+        var now = DateTime.UtcNow;
+        var existing = await _db.SeriesMappings
+            .FirstOrDefaultAsync(m => m.SeriesId == series.Id && m.Provider == provider, token);
+
+        // Blocked is id-level: the user blocked this exact id → the contribution hit cannot be used.
+        if (existing?.MappingStatus == SeriesMappingStatus.Blocked &&
+            string.Equals(existing.ExternalSeriesId, externalId, StringComparison.OrdinalIgnoreCase))
+        {
+            _logger.LogDebug("Contribution hit refused series {SeriesId} provider {Provider}: id {Id} is blocked",
+                series.Id, provider, externalId);
+            return null;
+        }
+
+        var scrobbler = _providerFactory.GetProvider(provider);
+        SeriesMetadataResult? metadata = null;
+        if (scrobbler != null)
+        {
+            try { metadata = await scrobbler.FetchSeriesMetadataAsync(externalId, token).ConfigureAwait(false); }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to fetch series metadata for contribution hit {Provider} {Id}", provider, externalId);
+            }
+        }
+        var externalTitle = metadata?.Title ?? existing?.ExternalSeriesTitle;
+        var coverUrl = metadata?.CoverUrl ?? existing?.SeriesCoverUrl;
+        var linkedSites = metadata?.LinkedSitesIds ?? [];
+        var altTitles = metadata?.AlternativeTitles ?? [];
+        var metaData = metadata?.MetaData;
+
+        if (existing != null)
+        {
+            existing.ExternalSeriesId = externalId;
+            existing.ExternalSeriesTitle = externalTitle;
+            existing.MappingStatus = SeriesMappingStatus.AutoMatched;
+            existing.LinkedDate = now;
+            existing.UpdateDate = now;
+            if (string.IsNullOrWhiteSpace(existing.SeriesCoverUrl) && !string.IsNullOrWhiteSpace(coverUrl))
+                existing.SeriesCoverUrl = coverUrl;
+            if (!string.IsNullOrWhiteSpace(metaData))
+                existing.MetaData = metaData;
+            existing.LinkedSitesIds = MergeStrings(existing.LinkedSitesIds, linkedSites);
+            existing.AlternativeTitles = MergeStrings(existing.AlternativeTitles, altTitles);
+        }
+        else
+        {
+            _db.SeriesMappings.Add(new SeriesMappingEntity
+            {
+                Id = Guid.NewGuid(),
+                SeriesId = series.Id,
+                Provider = provider,
+                ExternalSeriesId = externalId,
+                ExternalSeriesTitle = externalTitle,
+                SeriesCoverUrl = coverUrl,
+                MetaData = metaData,
+                LinkedSitesIds = linkedSites,
+                AlternativeTitles = altTitles,
+                UserUid = userId,
+                UserRole = UserLevel.User,
+                MappingStatus = SeriesMappingStatus.AutoMatched,
+                LinkedDate = now,
+                UpdateDate = now
+            });
+        }
+        await _db.SaveChangesAsync(token);
+        await _seriesStateService.SyncToRensaioJsonAsync(series.Id, token).ConfigureAwait(false);
+        await SyncContributionAsync(series.Id, token);
+        _logger.LogDebug("Auto-matched series {SeriesId} provider {Provider} -> {ExternalId} via contribution DB hit",
+            series.Id, provider, externalId);
+
+        return new SeriesMatchStatusDto
+        {
+            SeriesId = series.Id,
+            SeriesTitle = series.Title,
+            Provider = provider,
+            MappingStatus = SeriesMappingStatus.AutoMatched,
+            ExternalSeriesId = externalId,
+            ExternalSeriesTitle = externalTitle,
+            ExternalCoverUrl = coverUrl,
+            MatchScore = 1.0
+        };
+    }
+
+    /// <summary>
+    /// Settles a (series, provider) relation as "ignoredAlways" (ForeverIgnored) because the
+    /// provider declared it cannot search this series (CanSearchSeries == false). Never downgrades
+    /// a stronger local decision (UserConfirmed / Blocked / ForeverIgnored).
+    /// </summary>
+    private async Task EnsureRelationIgnoredAsync(Guid userId, Guid seriesId,
+        ExternalSeriesProvider provider, CancellationToken token)
+    {
+        var existing = await _db.SeriesMappings
+            .FirstOrDefaultAsync(m => m.SeriesId == seriesId && m.Provider == provider, token);
+        var now = DateTime.UtcNow;
+        if (existing != null)
+        {
+            if (existing.MappingStatus == SeriesMappingStatus.UserConfirmed
+                || existing.MappingStatus == SeriesMappingStatus.Blocked
+                || existing.MappingStatus == SeriesMappingStatus.ForeverIgnored)
+                return; // user/stronger decision stands
+            existing.ExternalSeriesId = string.Empty;
+            existing.MappingStatus = SeriesMappingStatus.ForeverIgnored;
+            existing.LinkedDate = now;
+            existing.UpdateDate = now;
+        }
+        else
+        {
+            _db.SeriesMappings.Add(new SeriesMappingEntity
+            {
+                Id = Guid.NewGuid(),
+                SeriesId = seriesId,
+                Provider = provider,
+                ExternalSeriesId = string.Empty,
+                ExternalSeriesTitle = null,
+                UserUid = userId,
+                UserRole = UserLevel.User,
+                MappingStatus = SeriesMappingStatus.ForeverIgnored,
+                LinkedDate = now,
+                UpdateDate = now
+            });
+        }
+        await _db.SaveChangesAsync(token);
+        await _seriesStateService.SyncToRensaioJsonAsync(seriesId, token).ConfigureAwait(false);
+        await SyncContributionAsync(seriesId, token);
+        _logger.LogDebug("Relation series {SeriesId} provider {Provider} set to ignoredAlways (CanSearchSeries=false)",
+            seriesId, provider);
+    }
+
+    private static List<string> MergeStrings(List<string> existing, List<string> incoming)
+    {
+        var set = new HashSet<string>(existing, StringComparer.OrdinalIgnoreCase);
+        foreach (var s in incoming) set.Add(s);
+        return set.ToList();
     }
 
     private async Task UpsertSeriesMappingAsync(Guid userId, Guid seriesId, ExternalSeriesProvider provider,

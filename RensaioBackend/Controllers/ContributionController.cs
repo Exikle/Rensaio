@@ -16,13 +16,19 @@ public class ContributionController : ControllerBase
 {
     private readonly ContributionUploadService _uploadService;
     private readonly ContributionDownloadService _downloadService;
+    private readonly ContributionImportService _importService;
+    private readonly ContributionToRensaioSyncService _toRensaioService;
 
     public ContributionController(
         ContributionUploadService uploadService,
-        ContributionDownloadService downloadService)
+        ContributionDownloadService downloadService,
+        ContributionImportService importService,
+        ContributionToRensaioSyncService toRensaioService)
     {
         _uploadService = uploadService;
         _downloadService = downloadService;
+        _importService = importService;
+        _toRensaioService = toRensaioService;
     }
 
     /// <summary>
@@ -66,6 +72,33 @@ public class ContributionController : ControllerBase
         {
             return BadRequest(new { error = result.Error });
         }
+        return Ok(result);
+    }
+
+    /// <summary>
+    /// Runs the GitHub metadata.bin import synchronously (fetch → decrypt → decompress →
+    /// decode → apply with source-of-truth semantics → propagation into rensaio.db).
+    /// Blocks until done; useful for manual testing and one-shot import.
+    /// </summary>
+    [HttpPost("import")]
+    [ProducesResponseType(typeof(ContributionImportResult), StatusCodes.Status200OK)]
+    public async Task<ActionResult<ContributionImportResult>> ImportAsync(CancellationToken token)
+    {
+        var result = await _importService.ImportAsync(token).ConfigureAwait(false);
+        if (!result.Success)
+        {
+            return BadRequest(new { error = result.Error });
+        }
+
+        // A skip means nothing changed — don't re-propagate into rensaio.db SeriesMappings.
+        if (result.WasSkipped)
+        {
+            return Ok(result);
+        }
+
+        // Propagate Auto/User into rensaio.db SeriesMappings.
+        await _toRensaioService.SyncAsync(token).ConfigureAwait(false);
+
         return Ok(result);
     }
 }

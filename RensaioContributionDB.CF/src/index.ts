@@ -65,6 +65,13 @@ async function scheduled(_controller: ScheduledController, env: Env, ctx: Execut
     (async () => {
       try {
         const result = await runDailyExport(env);
+        if (!result.exported) {
+          console.log(
+            `Cron export: no pending changes — version ${result.version} unchanged, nothing pushed (scrubbed ` +
+              `${JSON.stringify(result.scrubbed)}, orphan titles archived ${result.orphanTitlesArchived}).`
+          );
+          return;
+        }
         console.log(
           `Cron export: scrubbed ${JSON.stringify(result.scrubbed)}, ` +
             `orphan titles archived ${result.orphanTitlesArchived}, ` +

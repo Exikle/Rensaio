@@ -1,6 +1,7 @@
 ﻿using RensaioBackend.Data;
 using RensaioBackend.Models.Enums;
 using RensaioBackend.Services.Jobs.Models;
+using RensaioBackend.Services.Metadata;
 using RensaioBackend.Services.Settings;
 using RensaioBackend.Utils;
 using Microsoft.EntityFrameworkCore;
@@ -13,15 +14,17 @@ namespace RensaioBackend.Services.Daily
         private readonly ContributionDbContext _contributorDb;
         private readonly ILogger _logger;
         private readonly IConfiguration _configuration;
+        private readonly MappingConflictRepairService? _repair;
 
         public DailyService(AppDbContext db, ContributionDbContext contributorDb,
-            ILogger<DailyService> logger, IConfiguration configuration)
+            ILogger<DailyService> logger, IConfiguration configuration,
+            MappingConflictRepairService? repair = null)
         {
             _db = db;
             _contributorDb = contributorDb;
             _logger = logger;
             _configuration = configuration;
-  
+            _repair = repair;
         }
 
         public async Task<JobResult> ExecuteAsync(JobInfo _, CancellationToken token = default)
@@ -30,9 +33,13 @@ namespace RensaioBackend.Services.Daily
             await CreateBackupAsync(token).ConfigureAwait(false);
             await CreateContributionBackupAsync(token).ConfigureAwait(false);
             await CleanupOldCompletedEnqueueAsync(token).ConfigureAwait(false);
+
+            // NOTE: mapping-conflict repair deliberately NOT run daily — it must only run at
+            // startup (StartupHostedService) and via the explicit repair endpoint. Running it
+            // from the daily job re-scans/block-cycles the whole library every day.
+
             _logger.LogInformation("Daily maintenance tasks completed.");
             return JobResult.Success;
-
         }
 
         public async Task CreateBackupAsync(CancellationToken token = default)

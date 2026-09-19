@@ -163,6 +163,14 @@ public class MyAnimeListScrobblerProvider : ProxyScrobblerProvider
         string key = GetUserExternalKey(externalSeriesId);
         _dedupState.Set(key, chapterNumber);
     }
+    public override bool CanSearchSeries(List<string> genres, string? category = null)
+    {
+        if (category != null && (category.Equals("comics", StringComparison.InvariantCultureIgnoreCase)
+            || category.Equals("comic", StringComparison.InvariantCultureIgnoreCase)
+            || (category.Contains("comic", StringComparison.InvariantCultureIgnoreCase) && category.Contains("western", StringComparison.InvariantCultureIgnoreCase))))
+            return false;
+        return true;
+    }
     public override async Task<bool> SetReadChaptersAsync(string externalSeriesId, Dictionary<decimal, float> chapterState, CancellationToken token = default)
     {
         try

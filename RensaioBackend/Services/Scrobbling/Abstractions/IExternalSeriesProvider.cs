@@ -1,3 +1,4 @@
+using RensaioBackend.Models.Database;
 using RensaioBackend.Models.Dto;
 using RensaioBackend.Models.Enums;
 
@@ -78,6 +79,8 @@ public interface IExternalSeriesProvider
     Task<bool> ValidateTokenAsync(CancellationToken token = default);
 
     List<string> FilterLookupTitles(IEnumerable<string> titles);
+
+    bool CanSearchSeries(List<string> genres, string? category = null);
 }
 
 /// <summary>

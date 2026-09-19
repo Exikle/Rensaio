@@ -140,12 +140,18 @@ namespace RensaioBackend
                 options.UseSqlite(EnvironmentSetup.ContributorConnectionString(Configuration)));
 
             // Contribution cloud export (POST /api/contributions/upload) and
-            // cloud snapshot import (POST /api/contributions/download).
+            // cloud snapshot import (POST /api/contributions/download) plus the
+            // daily/startup GitHub metadata.bin import pipeline.
             services.AddHttpClient("ContributionUpload");
+            services.AddHttpClient("ContributionImport");
             services.TryAddSingleton<IContributionUploadQueue, ContributionUploadQueue>();
+            services.TryAddSingleton<ContributionDbGate>();
             services.AddScoped<ContributionUploadService>();
             services.AddScoped<ContributionDownloadService>();
+            services.AddScoped<ContributionImportService>();
+            services.AddScoped<ContributionToRensaioSyncService>();
             services.AddHostedService<ContributionUploadBackgroundService>();
+            services.AddHostedService<ContributionImportBackgroundService>();
 
             // Contributor verification against the cloud contribution DB (RensaioContributionDB.CF).
             services.AddHttpClient("ContributionVerification");

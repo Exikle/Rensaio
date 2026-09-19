@@ -69,6 +69,8 @@ adminRoutes.post('/export', async (c) => {
       orphanTitlesArchived: result.orphanTitlesArchived,
       version: result.version,
       compression: result.compression,
+      sha256: result.sha256,
+      skippedNoChanges: !result.exported,
     });
   } catch (err) {
     console.error('Manual export failed:', err);

@@ -284,6 +284,17 @@ namespace RensaioBackend.Services.Series
                 await _providerService.RescheduleIfNeededAsync([p], false, true, token).ConfigureAwait(false);
             }
 
+            // Remove global scrobbling/mapping rows for this series. The model configures
+            // ON DELETE CASCADE for SeriesMappings.SeriesId, but mapping rows may exist that
+            // are not loaded into this context (so EF's client-side cascade can't see them),
+            // and existing databases may still carry the legacy NO ACTION FK. Removing them
+            // explicitly makes deletion deterministic regardless of DB/schema state.
+            var mappingsToRemove = await _db.SeriesMappings
+                .Where(m => m.SeriesId == id)
+                .ToListAsync(token).ConfigureAwait(false);
+            if (mappingsToRemove.Count > 0)
+                _db.SeriesMappings.RemoveRange(mappingsToRemove);
+
             _db.Series.Remove(dbSeries);
             
             await _providerService.CheckIfTheStorageFlagsChangedTheInLibraryStatusOfLastSeriesAsync(
@@ -332,7 +343,15 @@ namespace RensaioBackend.Services.Series
                     // Cap concurrency: each details/chapters fetch crosses the IKVM boundary and
                     // consumes process thread budget shared with CEF (see SourceTimeoutGate).
                     var latestMaxConcurrency = Math.Min(s.NumberOfSimultaneousDownloadsPerProvider, 4);
-                    await Parallel.ForEachAsync(res.Mangas, new ParallelOptions
+                    // Dedupe by manga URL: some sources (e.g. Madara) return one row per updated
+                    // chapter, so the same manga can appear multiple times on a "latest" page.
+                    // Fetching the same manga concurrently trips the extension's own guard
+                    // ("getMangaUpdate must not be called concurrently for same manga").
+                    var uniqueMangas = res.Mangas
+                        .GroupBy(ss => string.IsNullOrEmpty(ss.Url) ? ss.Title : ss.Url, StringComparer.Ordinal)
+                        .Select(g => g.First())
+                        .ToList();
+                    await Parallel.ForEachAsync(uniqueMangas, new ParallelOptions
                     {
                         CancellationToken = token,
                         MaxDegreeOfParallelism = latestMaxConcurrency
@@ -341,31 +360,44 @@ namespace RensaioBackend.Services.Series
                         {
                             if (upToDate)
                                 return;
-                            ComboSeries s = new ComboSeries();
+                            ComboSeries combo = new ComboSeries();
                             string mihonId = mihonProviderId + "|" + ss.Url;
-                            s.MihonId= mihonId;
+                            combo.MihonId = mihonId;
+                            // Serialize per (provider+manga) across the whole process so a library
+                            // GetChapters job can never race this loop on the same manga. Key uses
+                            // the canonical numeric source id + url so every caller of the same
+                            // source collapses onto the same lock (see ISourceInterop.Id).
+                            string mangaLockKey = src.Id + "|" + ss.Url;
                             if (!latestDates.TryGetValue(mihonId, out (DateTime, Manga?, ParsedChapter?) value) ||
                                 (value.Item1.AddDays(7) < DateTime.UtcNow))
                             {
-                                s.Series = await _mihon.MihonErrorWrapperAsync(
-                                    () => src.GetDetailsAsync(ss, token),
-                                    "Unable to get Series {Title} from {provider}", ss.Title, provider).ConfigureAwait(false);
-                                if (s.Series == null)
+                                MangaUpdate? update = await _mihon.MihonErrorWrapperLockedAsync(
+                                    () => src.GetDetailsAndChaptersAsync(ss, token),
+                                    "Unable to get Series {Title} from {provider}", mangaLockKey, ss.Title, provider).ConfigureAwait(false);
+                                if (update == null)
                                     return;
-                                newChaps[mihonId] = s;
+                                combo.Series = update.Manga;
+                                combo.Chapters = update.Chapters;
+                                newChaps[mihonId] = combo;
                             }
-
-                            List<ParsedChapter>? chaps = await _mihon.MihonErrorWrapperAsync(
-                                () => src.GetChaptersAsync(ss, token),
-                                "Unable to get Series {Title} Chapters from {provider}", ss.Title, provider).ConfigureAwait(false);
-                            if (chaps == null)
+                            else
                             {
-                                newChaps.Remove(mihonId, out _);
-                                return;
+                                // Fresh entry already in DB; still fetch chapter list to detect
+                                // "up to date" and record the latest chapter, but also guard the
+                                // same-manga lock to avoid racing a library GetChapters job.
+                                List<ParsedChapter>? chaps = await _mihon.MihonErrorWrapperLockedAsync(
+                                    () => src.GetChaptersAsync(ss, token),
+                                    "Unable to get Series {Title} Chapters from {provider}", mangaLockKey, ss.Title, provider).ConfigureAwait(false);
+                                if (chaps == null)
+                                {
+                                    newChaps.Remove(mihonId, out _);
+                                    return;
+                                }
+                                combo.Chapters = chaps;
+                                newChaps[mihonId] = combo;
                             }
 
-                            s.Chapters = chaps;
-                            ParsedChapter? latest_online = chaps.OrderByDescending(a => a.Index).FirstOrDefault();
+                            ParsedChapter? latest_online = combo.Chapters.OrderByDescending(a => a.Index).FirstOrDefault();
                             if (latest_online != null && latestDates.TryGetValue(mihonId, out (DateTime, Manga?, ParsedChapter?) value2) && value2.Item2 != null && value2.Item3!=null)
                             {
                                 if ((latestDates[mihonId].Item3!.Index >= latest_online.Index) &&
@@ -503,12 +535,19 @@ namespace RensaioBackend.Services.Series
             
             string provider = src.Name + " (" + src.Language + ")";
             _logger.LogInformation("Getting chapters from Series {series} Provider {provider}", serie.Title, provider);
+            // Serialize per (provider+manga) so this refresh cannot race the provider-wide
+            // latest loop (or another job) on the same manga — Madara sources throw
+            // "getMangaUpdate must not be called concurrently for same manga" on collision.
+            // Key uses the canonical source id (see ISourceInterop.Id) so all callers of the
+            // same source collapse onto one lock.
+            Manga manga = serie.ToManga()!;
+            string mangaLockKey = src.Id + "|" + manga.Url;
             List<ParsedChapter>? chapterData;
             try
             {
-                chapterData = await _mihon.MihonErrorWrapperAsync(
-                    () => src.GetChaptersAsync(serie.ToManga()!, token),
-                    "Unable to get Chapters from {series} from {provider}", serie.Title, provider).ConfigureAwait(false);
+                chapterData = await _mihon.MihonErrorWrapperLockedAsync(
+                    () => src.GetChaptersAsync(manga, token),
+                    "Unable to get Chapters from {series} from {provider}", mangaLockKey, serie.Title, provider).ConfigureAwait(false);
             }
             catch (Exception)
             {
@@ -538,9 +577,9 @@ namespace RensaioBackend.Services.Series
             // Refresh series metadata (status, description, etc.) from the extension
             try
             {
-                var extensionManga = await _mihon.MihonErrorWrapperAsync(
-                    () => src.GetDetailsAsync(serie.ToManga()!, token),
-                    "Unable to get Details from {series} from {provider}", serie.Title, provider).ConfigureAwait(false);
+                var extensionManga = await _mihon.MihonErrorWrapperLockedAsync(
+                    () => src.GetDetailsAsync(manga, token),
+                    "Unable to get Details from {series} from {provider}", mangaLockKey, serie.Title, provider).ConfigureAwait(false);
 
                 if (extensionManga != null)
                 {
@@ -736,9 +775,11 @@ namespace RensaioBackend.Services.Series
                 return new RedownloadResult(RedownloadOutcome.NoSourceAvailable);
             }
 
-            List<ParsedChapter>? chapterData = await _mihon.MihonErrorWrapperAsync(
-                () => src.GetChaptersAsync(target.ToManga()!, token),
-                "Unable to get Chapters from {series} from {provider}", series.Title, target.Provider).ConfigureAwait(false);
+            Manga targetManga = target.ToManga()!;
+            string targetLockKey = src.Id + "|" + targetManga.Url;
+            List<ParsedChapter>? chapterData = await _mihon.MihonErrorWrapperLockedAsync(
+                () => src.GetChaptersAsync(targetManga, token),
+                "Unable to get Chapters from {series} from {provider}", targetLockKey, series.Title, target.Provider).ConfigureAwait(false);
             if (chapterData == null || chapterData.Count == 0)
                 return new RedownloadResult(RedownloadOutcome.ChapterNotFound);
 
@@ -1072,6 +1113,11 @@ namespace RensaioBackend.Services.Series
                 dbSeries.StartFromChapter = startFromChapter;
                 await _db.Series.AddAsync(dbSeries, token).ConfigureAwait(false);
             }
+
+            // Derive the series Type (genre → categorized path → Unknown) when it is still empty.
+            // Matching is case-invariant and the result is PascalCased.
+            var settings = await _settings.GetSettingsAsync(token).ConfigureAwait(false);
+            dbSeries.EnsureSeriesType(settings.CategorizedFolders, settings.Categories);
 
             return dbSeries;
         }

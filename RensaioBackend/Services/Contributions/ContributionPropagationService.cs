@@ -45,19 +45,81 @@ namespace RensaioBackend.Services.Contributions
 
         /// <summary>
         /// Returns <c>true</c> when the contribution flag is enabled and the
-        /// contributor database is available.
+        /// contributor database is available. Reads the PERSISTED flags directly from the
+        /// Settings table (not the in-memory cache) so a just-verified flag that was written via
+        /// <see cref="SettingsService.SetContributionVerifiedAsync"/> is honored immediately.
         /// </summary>
         public async Task<bool> IsEnabledAsync(CancellationToken token = default)
         {
             try
             {
-                var settings = await _settingsService.GetSettingsAsync(token).ConfigureAwait(false);
-                return settings.ContributionEnabled && settings.ContributionVerified;
+                var rows = await _db.Settings
+                    .AsNoTracking()
+                    .Where(s => s.Name == "ContributionEnabled"
+                        || s.Name == "ContributionVerified")
+                    .Select(s => new SettingEntity { Name = s.Name, Value = s.Value })
+                    .ToListAsync(token).ConfigureAwait(false);
+                bool enabled = GetSettingBool(rows, "ContributionEnabled");
+                bool verified = GetSettingBool(rows, "ContributionVerified");
+                _logger.LogInformation("Contribution propagation gate: ContributionEnabled={Enabled}, ContributionVerified={Verified}",
+                    enabled, verified);
+                return enabled && verified;
             }
             catch (Exception ex)
             {
                 _logger.LogWarning(ex, "Failed to read contribution flag");
                 return false;
+            }
+        }
+
+        private static bool GetSettingBool(List<SettingEntity> rows, string name)
+            => rows.FirstOrDefault(r => r.Name == name)?.Value is { } v
+                && bool.TryParse(v, out var b) && b;
+
+        /// <summary>
+        /// Propagates the mapping state of EVERY series into the contribution database.
+        /// Used when a user becomes a contributor (ContributionVerified flips to true):
+        /// the whole SeriesMappings graph is migrated to contributor.db in one pass.
+        /// Best-effort: iterates <see cref="SyncSeriesAsync"/> per series; no-ops when the
+        /// contribution is not enabled+verified; never throws into the caller.
+        /// </summary>
+        public async Task SyncAllSeriesAsync(CancellationToken token = default)
+        {
+            _logger.LogInformation("SyncAllSeriesAsync: starting full contribution propagation.");
+            if (!await IsEnabledAsync(token).ConfigureAwait(false))
+            {
+                _logger.LogWarning("SyncAllSeriesAsync: gate is DISABLED (contributions not enabled+verified) — skipping migration.");
+                return;
+            }
+            try
+            {
+                var ids = await _db.Series.AsNoTracking()
+                    .Select(s => s.Id)
+                    .ToListAsync(token).ConfigureAwait(false);
+                _logger.LogInformation("SyncAllSeriesAsync: gate OK — {Count} series to propagate.", ids.Count);
+                var processed = 0;
+                foreach (var id in ids)
+                {
+                    if (token.IsCancellationRequested) break;
+                    // Read fresh settings each iteration so a just-verified flag (persisted via
+                    // SetContributionVerifiedAsync) is picked up even if the in-memory cache is stale.
+                    if (!await IsEnabledAsync(token).ConfigureAwait(false))
+                    {
+                        _logger.LogWarning("SyncAllSeriesAsync: gate became disabled mid-run — aborting after {Processed} series.", processed);
+                        return;
+                    }
+                    await SyncSeriesAsync(id, token).ConfigureAwait(false);
+                    processed++;
+                    if (processed % 200 == 0)
+                    {
+                        _logger.LogInformation("SyncAllSeriesAsync: {Processed}/{Total} series propagated so far.", processed, ids.Count);
+                    }
+                }
+                _logger.LogInformation("Contribution propagation: migrated {Count} series mappings to contributor database.", ids.Count);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to propagate all series mappings to contributor database");
             }
         }
 

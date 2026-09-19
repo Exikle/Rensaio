@@ -7,7 +7,7 @@ import {
 } from '@/lib/api/types';
 
 interface ListParams {
-  filter?: 'all' | 'unmatched';
+  filter?: 'all' | 'unmatched' | 'blocked';
   page?: number;
   pageSize?: number;
   status?: SeriesMappingStatus | null;
@@ -94,6 +94,16 @@ export const useContributionMappingsIgnore = () => {
   return useMutation({
     mutationFn: ({ mappingId, provider, forever }: { mappingId: string; provider: string; forever: boolean }) =>
       contributionMappingsService.ignoreMapping(mappingId, provider, forever),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: contributionMappingsQueryKey });
+    },
+  });
+};
+
+export const useContributionMappingsIgnoreAll = () => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (mappingId: string) => contributionMappingsService.ignoreAllUnmatched(mappingId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: contributionMappingsQueryKey });
     },

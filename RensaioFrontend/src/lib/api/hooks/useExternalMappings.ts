@@ -7,7 +7,7 @@ import {
 } from '@/lib/api/types';
 
 interface ListParams {
-  filter?: 'all' | 'unmatched';
+  filter?: 'all' | 'unmatched' | 'blocked';
   page?: number;
   pageSize?: number;
   status?: SeriesMappingStatus | null;
@@ -87,6 +87,16 @@ export const useExternalMappingsIgnore = () => {
   return useMutation({
     mutationFn: ({ seriesId, provider, forever }: { seriesId: string; provider: string; forever: boolean }) =>
       externalMappingsService.ignoreSeries(seriesId, provider, forever),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['external-mappings'] });
+    },
+  });
+};
+
+export const useExternalMappingsIgnoreAll = () => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (seriesId: string) => externalMappingsService.ignoreAllUnmatched(seriesId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['external-mappings'] });
     },

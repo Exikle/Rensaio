@@ -317,7 +317,14 @@ public class AniListScrobblerProvider : ProxyScrobblerProvider
             return null;
         }
     }
-
+    public override bool CanSearchSeries(List<string> genres, string? category = null)
+    {
+        if (category != null && (category.Equals("comics", StringComparison.InvariantCultureIgnoreCase) 
+            || category.Equals("comic", StringComparison.InvariantCultureIgnoreCase) 
+            || (category.Contains("comic", StringComparison.InvariantCultureIgnoreCase) && category.Contains("western", StringComparison.InvariantCultureIgnoreCase))))
+            return false;
+        return true;
+    }
     private async Task<int> GetChaptersReadTotalAsync(string externalSeriesId, CancellationToken token)
     {
         try

@@ -59,6 +59,8 @@ export interface ExportResponse {
   files: string[];
   version: number;
   compression: number;  // 0 = zstd, 1 = brotli
+  sha256: string;       // base64 SHA-256 of the decoded metadata.bin bytes
+  skippedNoChanges: boolean; // true when nothing was exported (no pending changes)
   scrubbed: {
     sources: number;
     metadata: number;

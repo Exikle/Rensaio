@@ -81,10 +81,12 @@ namespace RensaioBackend.Services
             services.AddScoped<IImageProvider, UrlImageProvider>();
             services.AddScoped<IImageProvider, ExtensionsImageProvider>();
             services.AddScoped<IImageProvider, StorageImageProvider>();
-            // Singleton: the bounded URL/ETag caches must be shared across all scoped
-            // consumers (they were previously static — surviving every scope and all
-            // requests — so a single shared instance is both correct and leaner).
-            services.TryAddSingleton<ThumbCacheService>();
+            // Scoped: the bounded URL/ETag caches are static, so they are already shared
+            // across all scoped consumers regardless of lifetime. A singleton must NOT
+            // capture the scoped AppDbContext (and scoped IImageProviders) in its
+            // constructor — that shares one DbContext across concurrent requests and
+            // throws "A second operation was started on this context instance.
+            services.TryAddScoped<ThumbCacheService>();
             services.AddHttpClient(nameof(ThumbCacheService), SetHttpClientHeaders);
             services.TryAddScoped<IImageFactory, NetVipsImageFactory>();
             services.TryAddScoped<ArchiveHelperService>();
@@ -120,6 +122,8 @@ namespace RensaioBackend.Services
             services.TryAddScoped<Metadata.MetadataMatchCore>();
             services.TryAddScoped<Metadata.ExternalMappingSupport>();
             services.TryAddScoped<Metadata.MetadataLinkEngine>();
+            // Wrong-linkage detection + auto-block repair (depends on the engine; registered after).
+            services.TryAddScoped<Metadata.MappingConflictRepairService>();
 
 
             // Register all external provider implementations under the UMBRELLA interface.
@@ -142,6 +146,9 @@ namespace RensaioBackend.Services
             services.AddScoped<Scrobbling.Abstractions.IExternalSeriesProvider, Scrobbling.Providers.BangumiMetadataProvider>();
             services.AddScoped<Scrobbling.Abstractions.IExternalSeriesProvider, Scrobbling.Providers.MangaUpdatesMetadataProvider>();
             services.AddScoped<Scrobbling.Abstractions.IExternalSeriesProvider, Scrobbling.Providers.ComicVineMetadataProvider>();
+            // Global metadata repository (in-memory; PR #76 will back it with the snapshot index).
+            services.TryAddScoped<Contributions.Abstractions.IGlobalMetadataRepository, Contributions.InMemoryGlobalMetadataRepository>();
+            services.TryAddScoped<Contributions.InMemoryGlobalMetadataRepository>();
 
             // Register HTTP clients
             services.AddHttpClient("Scrobbler_AniList", SetHttpClientHeaders);

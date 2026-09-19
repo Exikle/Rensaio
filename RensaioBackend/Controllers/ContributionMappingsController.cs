@@ -195,6 +195,42 @@ public class ContributionMappingsController : ControllerBase
         return Ok(new { message = "Ignored" });
     }
 
+    /// <summary>
+    /// POST /api/contribution-mappings/mappings/{mappingId}/ignore-all — mark every Not Matched
+    /// (Unmatched) provider of a contribution mapping as ForeverIgnored ("Ignore always"), then
+    /// cascade each ignored provider into the Rensaio DB for matching series — same semantics as
+    /// the per-provider ignore action.
+    /// </summary>
+    [HttpPost("mappings/{mappingId:guid}/ignore-all")]
+    public async Task<ActionResult> IgnoreAllUnmatchedMapping(Guid mappingId, CancellationToken token)
+    {
+        if (await ContributionDisabledAsync(token).ConfigureAwait(false)) return NotFound();
+
+        var providers = await EnabledProvidersAsync(token).ConfigureAwait(false);
+        var ignored = await _mappingService.IgnoreAllUnmatchedAsync(mappingId, providers, token).ConfigureAwait(false);
+
+        foreach (var p in ignored)
+        {
+            await CascadeAsync(mappingId, p,
+                apply: m => { m.MappingStatus = SeriesMappingStatus.ForeverIgnored; m.LinkedDate = DateTime.UtcNow; },
+                create: seriesId => new SeriesMappingEntity
+                {
+                    Id = Guid.NewGuid(),
+                    SeriesId = seriesId,
+                    Provider = p,
+                    ExternalSeriesId = string.Empty,
+                    MappingStatus = SeriesMappingStatus.ForeverIgnored,
+                    LinkedDate = DateTime.UtcNow,
+                    UpdateDate = DateTime.UtcNow
+                },
+                token: token).ConfigureAwait(false);
+        }
+
+        return Ok(new { message = ignored.Count > 0
+            ? $"Ignored {ignored.Count} providers"
+            : "No unmatched providers to ignore" });
+    }
+
     /// <summary>DELETE /api/contribution-mappings/mappings/{mappingId}/{provider} — remove a mapping (tombstone).</summary>
     [HttpDelete("mappings/{mappingId:guid}/{provider}")]
     public async Task<ActionResult> UnlinkMapping(Guid mappingId, string provider, CancellationToken token)

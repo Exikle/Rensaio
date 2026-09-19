@@ -1,5 +1,6 @@
 import type { BanResponse, BanScrubSummary } from '../models/responses';
 import type { Contributor } from '../db/schema';
+import { markPendingChanges } from './replication-service';
 
 /**
  * Ban a contributor and archive all their non-archived data.
@@ -127,6 +128,16 @@ export async function banContributor(
       .bind(now),
   ]);
 
+  // Archiving a banned contributor's data is a change → the next export must
+  // publish a new version reflecting it. Best-effort, never fails the ban.
+  if ((seriesCount?.count ?? 0) > 0 || (metadataCount?.count ?? 0) > 0) {
+    try {
+      await markPendingChanges(db);
+    } catch (err) {
+      console.error('Failed to mark pending changes after ban:', err);
+    }
+  }
+
   const scrubbed: BanScrubSummary = {
     sources: seriesCount?.count ?? 0,
     series: seriesCount?.count ?? 0,
@@ -200,6 +211,14 @@ export async function cleanTables(db: D1Database): Promise<{
     db.prepare('DELETE FROM titles'),
     db.prepare('DELETE FROM mappings'),
   ]);
+
+  // A wipe is a change → the next export must publish the (now empty) dataset.
+  // Best-effort, never fails the clean itself.
+  try {
+    await markPendingChanges(db);
+  } catch (err) {
+    console.error('Failed to mark pending changes after clean:', err);
+  }
 
   return {
     sources: results[3].meta.changes,

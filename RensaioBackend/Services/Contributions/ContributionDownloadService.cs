@@ -220,6 +220,35 @@ public class ContributionDownloadService
                     }
                 }
             }
+
+            // ── 3b. Mappings reconcile (title unglue) ──
+            // The cloud snapshot is the source of truth for the mapping-title graph. A title the
+            // cloud moved to a different mapping (mapping-conflict repair) must stop being
+            // associated with the stale local mapping. Tombstone local non-pending mapping_title
+            // rows whose (mappingId, titleId) is absent from the snapshot; local pending rows
+            // (Version 0/-1, user edits) are preserved.
+            var desiredPairs = new HashSet<(Guid MappingId, Guid TitleId)>();
+            foreach (var (cloudMappingId, titleIds) in cloudMappingTitlesById)
+            {
+                if (!localByCloudMapping.TryGetValue(cloudMappingId, out var localMappingId))
+                    continue;
+                foreach (var titleId in titleIds.Distinct())
+                    desiredPairs.Add((localMappingId, titleId));
+            }
+            var localMappingIds = localByCloudMapping.Values.Distinct().ToList();
+            var localMappingTitleRows = await _contributorDb.MappingTitles
+                .Where(mt => localMappingIds.Contains(mt.MappingId)
+                    && mt.Version != VersionAddOrUpdate
+                    && mt.Version != -1)
+                .ToListAsync(token).ConfigureAwait(false);
+            foreach (var mt in localMappingTitleRows)
+            {
+                if (desiredPairs.Contains((mt.MappingId, mt.TitleId))) continue;
+                _contributorDb.MappingTitles.Attach(mt);
+                mt.Version = -1;
+                _contributorDb.Entry(mt).Property(x => x.Version).IsModified = true;
+            }
+
             int mappingCount = localByCloudMapping.Count;
 
             // ── 4. Series (deterministic ids, mapping re-keyed) ──

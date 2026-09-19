@@ -92,8 +92,39 @@ public class SeriesMappingEntity
     /// basis: a <see cref="SeriesMappingStatus.TemporaryIgnored"/> mapping becomes eligible for
     /// re-evaluation when <c>LinkedDate + 1 month <= now</c>. There is deliberately no separate
     /// "ReviewAfter" column — it is always derived from <see cref="LinkedDate"/>.
+    ///
+    /// Sentinel overload: when <see cref="MappingStatus"/> is <see cref="SeriesMappingStatus.Blocked"/>
+    /// for a repair-created (auto-sealed) block, <see cref="LinkedDate"/> carries
+    /// <see cref="AutoSealedSentinel"/> (a fixed value far in the past that can never collide with a
+    /// real timestamp). This lets the scanner distinguish a MANUAL id-block (re-scan allowed — a
+    /// different id may still match) from a REPAIR-SEALED block (settled — the whole provider is off
+    /// for this series until the user unblocks). Used by <c>SeriesNeedsAttention</c>.
     /// </summary>
     public DateTime? LinkedDate { get; set; }
+
+    /// <summary>
+    /// Sentinel value stamped on <see cref="LinkedDate"/> for repair-created (auto-sealed) Blocked
+    /// rows. Chosen far in the past (year 2000) so real UTC dates never collide; also naturally
+    /// sorts as "older than" any TemporaryIgnored expiry threshold (so a sealed block is never
+    /// mistaken for an expired TemporaryIgnored).
+    /// </summary>
+    public static readonly DateTime AutoSealedSentinel =
+        new DateTime(2000, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+
+    /// <summary>
+    /// True when this row is a REPAIR-SEALED id-block: <see cref="MappingStatus"/> is
+    /// <see cref="SeriesMappingStatus.Blocked"/> and <see cref="LinkedDate"/> equals
+    /// <see cref="AutoSealedSentinel"/>. Manual id-blocks (created via the UI/API Block action or the
+    /// scrobbler) carry a real LinkedDate, so they return false and remain re-scannable.
+    /// </summary>
+    public bool IsAutoSealedBlock
+        => MappingStatus == SeriesMappingStatus.Blocked
+            && LinkedDate.HasValue
+            && ValueCloseTo(LinkedDate.Value, AutoSealedSentinel);
+
+    /// <summary>Roundtrip-safe comparison (SQLite TEXT stores 7-digit precision).</summary>
+    private static bool ValueCloseTo(DateTime a, DateTime b)
+        => Math.Abs((a - b).TotalSeconds) < 1.0;
 
     [ForeignKey(nameof(SeriesId))]
     public SeriesEntity? Series { get; set; }

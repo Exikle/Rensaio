@@ -228,6 +228,16 @@ public class MangaBakaMetadataProvider : IExternalSeriesProvider
         return titles.ToList();
     }
 
+    public bool CanSearchSeries(List<string> genres, string? category = null)
+    {
+        // MangaBaka is a manga/light-novel hub — western comics are not indexed.
+        if (category != null && (category.Equals("comics", StringComparison.InvariantCultureIgnoreCase)
+            || category.Equals("comic", StringComparison.InvariantCultureIgnoreCase)
+            || (category.Contains("comic", StringComparison.InvariantCultureIgnoreCase) && category.Contains("western", StringComparison.InvariantCultureIgnoreCase))))
+            return false;
+        return true;
+    }
+
     // ── JSON models (provider-native) ──
 
     private class MangaBakaSearchResponse

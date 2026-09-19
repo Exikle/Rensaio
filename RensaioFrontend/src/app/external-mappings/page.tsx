@@ -14,7 +14,7 @@ import { JobType, ProgressStatus } from '@/lib/api/types';
 import { useContributionUpload } from '@/lib/api/hooks/useContributionUpload';
 import { useToast } from '@/hooks/use-toast';
 import { useContributionEnabled } from '@/hooks/use-contribution-enabled';
-import { useExternalMappings, useExternalMappingsScanAll, useExternalMappingsScanSeries, useExternalMappingsBlock, useExternalMappingsUnblock, useExternalMappingsIgnore } from "@/lib/api/hooks/useExternalMappings";
+import { useExternalMappings, useExternalMappingsScanAll, useExternalMappingsScanSeries, useExternalMappingsBlock, useExternalMappingsUnblock, useExternalMappingsIgnore, useExternalMappingsIgnoreAll } from "@/lib/api/hooks/useExternalMappings";
 import { ScrobblerSearchRequester } from '@/components/comp/scrobbler/scrobbler-search-requester';
 import { ScrobblerProvider, SeriesMappingStatus, type ExternalSeriesGroup, type ExternalMappingsPage, type ExternalSeriesProviderMapping } from '@/lib/api/types';
 
@@ -83,7 +83,7 @@ export default function ExternalMappingsPage() {
     });
   };
 
-  const [filter, setFilter] = useState<'all' | 'unmatched'>('unmatched');
+  const [filter, setFilter] = useState<'all' | 'unmatched' | 'blocked'>('unmatched');
   const [page, setPage] = useState(0);
   const [statusFilter, setStatusFilter] = useState<number | null>(null);
   const [scanProgress, setScanProgress] = useState<string | null>(null);
@@ -104,6 +104,7 @@ export default function ExternalMappingsPage() {
   const block = useExternalMappingsBlock();
   const unblock = useExternalMappingsUnblock();
   const ignore = useExternalMappingsIgnore();
+  const ignoreAll = useExternalMappingsIgnoreAll();
 
   // Refresh the table after a manual map confirm (external-mappings rows changed).
   const handleSearchConfirmed = useCallback(() => {
@@ -177,13 +178,14 @@ export default function ExternalMappingsPage() {
 
       <div className="flex flex-wrap items-center gap-3">
         {/* Filter combo — left aligned, default Unmatched. */}
-        <Select value={filter} onValueChange={(v) => { setFilter(v as 'all' | 'unmatched'); setPage(0); }}>
+        <Select value={filter} onValueChange={(v) => { setFilter(v as 'all' | 'unmatched' | 'blocked'); setPage(0); }}>
           <SelectTrigger className="w-40">
             <SelectValue placeholder="Unmatched" />
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="unmatched">Unmatched</SelectItem>
             <SelectItem value="all">All</SelectItem>
+            <SelectItem value="blocked">Blocked</SelectItem>
           </SelectContent>
         </Select>
 
@@ -226,6 +228,7 @@ export default function ExternalMappingsPage() {
         block={block}
         unblock={unblock}
         ignore={ignore}
+        ignoreAll={ignoreAll}
         seriesScanStates={seriesScanStates}
         onSearch={setSearchTarget}
       />
@@ -269,6 +272,7 @@ interface SeriesTableActions {
   block: ReturnType<typeof useExternalMappingsBlock>;
   unblock: ReturnType<typeof useExternalMappingsUnblock>;
   ignore: ReturnType<typeof useExternalMappingsIgnore>;
+  ignoreAll: ReturnType<typeof useExternalMappingsIgnoreAll>;
   seriesScanStates?: Record<string, SeriesScanState>;
   onSearch: (target: {
     seriesId: string;
@@ -279,7 +283,7 @@ interface SeriesTableActions {
   }) => void;
 }
 
-function SeriesTable({ groups, providerMeta, loading, scanSeries, block, unblock, ignore, onSearch, seriesScanStates }: {
+function SeriesTable({ groups, providerMeta, loading, scanSeries, block, unblock, ignore, ignoreAll, onSearch, seriesScanStates }: {
   groups: ExternalSeriesGroup[];
   providerMeta: ExternalMappingsPage['providerMeta'];
   loading: boolean;
@@ -301,6 +305,7 @@ function SeriesTable({ groups, providerMeta, loading, scanSeries, block, unblock
               block={block}
               unblock={unblock}
               ignore={ignore}
+              ignoreAll={ignoreAll}
               seriesScanStates={seriesScanStates}
               onSearch={onSearch}
             />
@@ -313,7 +318,7 @@ function SeriesTable({ groups, providerMeta, loading, scanSeries, block, unblock
 }
 
 /** Renders the grouped series: title header (full width, with group-level Scan) + a left series thumb spanning all provider rows. */
-function SeriesGroupRows({ group, providerMeta, scanSeries, block, unblock, ignore, onSearch, seriesScanStates }: {
+function SeriesGroupRows({ group, providerMeta, scanSeries, block, unblock, ignore, ignoreAll, onSearch, seriesScanStates }: {
   group: ExternalSeriesGroup;
   providerMeta: ExternalMappingsPage['providerMeta'];
 } & SeriesTableActions) {
@@ -331,6 +336,17 @@ function SeriesGroupRows({ group, providerMeta, scanSeries, block, unblock, igno
               variant="outline"
               size="sm"
               className="ml-auto gap-1"
+              onClick={() => ignoreAll.mutate(group.seriesId)}
+              disabled={ignoreAll.isPending}
+              title="Mark every Not matched provider for this series as Ignore always"
+            >
+              <EyeOff className="h-3.5 w-3.5" />
+              {ignoreAll.isPending ? 'Ignoring…' : 'Ignore All'}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              className="gap-1"
               onClick={() => scanSeries.mutate(group.seriesId)}
               disabled={isScanning}
               title={

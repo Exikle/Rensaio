@@ -12,6 +12,7 @@ using RensaioBackend.Services.Scrobbling;
 using RensaioBackend.Services.Scrobbling.Abstractions;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
 namespace RensaioBackend.Controllers;
@@ -68,10 +69,11 @@ public class ExternalMappingsController : ControllerBase
     }
 
     /// <summary>
-    /// GET /api/external-mappings?filter=all|unmatched&page=&pageSize=&provider=&status=
+    /// GET /api/external-mappings?filter=all|unmatched|blocked&page=&pageSize=&provider=&status=
     /// Series-scope only. `unmatched` (default) returns only local series that have at least one
     /// Unmatched provider row, or a TemporaryIgnored row whose LinkedDate + 1 month has passed
-    /// (the ignore has expired — the row is treated as Unmatched again).
+    /// (the ignore has expired — the row is treated as Unmatched again). `blocked` returns only
+    /// series that have at least one Blocked provider row.
     /// </summary>
     [HttpGet]
     public async Task<ActionResult<ExternalMappingsPageDto>> List(
@@ -92,6 +94,7 @@ public class ExternalMappingsController : ControllerBase
         // The global-titles scope has been removed — this page is always series-scoped.
         var isUnmatchedFilter = string.Equals(filter, "unmatched", StringComparison.OrdinalIgnoreCase)
             || string.IsNullOrWhiteSpace(filter);
+        var isBlockedFilter = string.Equals(filter, "blocked", StringComparison.OrdinalIgnoreCase);
 
         // Cutoff for "TemporaryIgnored has expired": LinkedDate + 1 month <= now.
         var nowMinusOneMonth = DateTime.UtcNow.AddMonths(-1);
@@ -141,6 +144,7 @@ public class ExternalMappingsController : ControllerBase
             };
 
             var groupHasUnmatched = false;
+            var groupHasBlocked = false;
             foreach (var p in providers)
             {
                 var mapping = allMappings.FirstOrDefault(m => m.SeriesId == series.Id && m.Provider == p.ProviderType);
@@ -178,6 +182,8 @@ public class ExternalMappingsController : ControllerBase
 
                 if (row.MappingStatus == SeriesMappingStatus.Unmatched)
                     groupHasUnmatched = true;
+                if (row.MappingStatus == SeriesMappingStatus.Blocked)
+                    groupHasBlocked = true;
 
                 group.Providers.Add(row);
             }
@@ -187,6 +193,8 @@ public class ExternalMappingsController : ControllerBase
             // filter=unmatched (default): keep only series that have at least one provider row
             // needing attention (Unmatched, including freshly-expired TemporaryIgnored).
             if (isUnmatchedFilter && !groupHasUnmatched) continue;
+            // filter=blocked: keep only series that have at least one Blocked provider row.
+            if (isBlockedFilter && !groupHasBlocked) continue;
 
             groups.Add(group);
         }
@@ -256,12 +264,28 @@ public class ExternalMappingsController : ControllerBase
         return Ok(group);
     }
 
-    /// <summary>POST /api/external-mappings/series/{seriesId}/scan — run the engine for one series.</summary>
+    /// <summary>
+    /// POST /api/external-mappings/series/{seriesId}/scan — run the engine for one series.
+    /// Explicit user action: ALWAYS re-evaluates every provider for this series, so a provider that
+    /// can't search this kind of series (e.g. ComicVine + manhwa) gets settled as ForeverIgnored
+    /// even when the rows were previously flagged Unmatched (which the background worker treats as
+    /// settled). The background settled-state gate (SeriesNeedsAttention) is intentionally NOT used
+    /// here — the user asked to scan this specific series.
+    /// </summary>
     [HttpPost("series/{seriesId:guid}/scan")]
     public async Task<ActionResult> ScanSeries(Guid seriesId, CancellationToken token)
     {
-        await _linkEngine.LinkSeriesAsync(seriesId, token).ConfigureAwait(false);
-        return Ok(new { message = "Scan completed" });
+        // Explicit per-series scan: re-evaluate ONLY the pending providers (unmatched / expired
+        // TemporaryIgnored / id-blocked / stale active rows / enabled providers with no row).
+        // Matched and other settled providers are never re-searched.
+        var enabledProviders = await _linkEngine.GetEnabledProviderSetAsync(token).ConfigureAwait(false);
+        var result = await _linkEngine.LinkSeriesAsync(seriesId, token, enabledProviders).ConfigureAwait(false);
+        return Ok(new
+        {
+            message = $"Scan completed: {result.Links.Count} linked, {result.Suggestions.Count} suggested",
+            linked = result.Links.Count,
+            suggestions = result.Suggestions.Count
+        });
     }
 
     /// <summary>
@@ -291,21 +315,32 @@ public class ExternalMappingsController : ControllerBase
             .FirstOrDefaultAsync(m => m.SeriesId == seriesId && m.Provider == providerResolved, token);
         if (mapping == null)
         {
+            // Blocking with NO id to refuse would create a meaningless hard block (empty key),
+            // which permanently disables the provider. Instead, keep the row Unmatched so a scan
+            // can still search this provider; the user must pick a specific id to block.
             mapping = new SeriesMappingEntity
             {
                 Id = Guid.NewGuid(),
                 SeriesId = seriesId,
                 Provider = providerResolved,
-                ExternalSeriesId = string.Empty,
-                MappingStatus = SeriesMappingStatus.Blocked,
+                MappingStatus = SeriesMappingStatus.Unmatched,
                 UpdateDate = DateTime.UtcNow
             };
             _db.SeriesMappings.Add(mapping);
         }
         else
         {
-            mapping.MappingStatus = SeriesMappingStatus.Blocked;
-            mapping.LinkedDate = mapping.LinkedDate ?? DateTime.UtcNow;
+            // Only set Blocked when there is a specific id to refuse; an existing row with no id
+            // (or one that's currently Unmatched) is left alone — hard-blocking without an id is
+            // the bug this guards against.
+            if (!string.IsNullOrWhiteSpace(mapping.ExternalSeriesId))
+            {
+                mapping.MappingStatus = SeriesMappingStatus.Blocked;
+                // A MANUAL block is always re-scannable: rewrite LinkedDate to a real timestamp so an
+                // inherited repair-sealed sentinel stays sealed. If the provider id changes to a
+                // different series, the user can match it manually; the scan may also suggest.
+                mapping.LinkedDate = DateTime.UtcNow;
+            }
             mapping.UpdateDate = DateTime.UtcNow;
         }
         await _db.SaveChangesAsync(token);
@@ -313,7 +348,13 @@ public class ExternalMappingsController : ControllerBase
         return Ok(new { message = "Blocked" });
     }
 
-    /// <summary>POST /api/external-mappings/series/{seriesId}/{provider}/unblock</summary>
+    /// <summary>
+    /// POST /api/external-mappings/series/{seriesId}/{provider}/unblock — re-open a blocked
+    /// provider for matching. The row is reset to Unmatched with a real LinkedDate (clearing any
+    /// repair-sealed sentinel), so the next scan can re-match this series against ANY provider id
+    /// (the old blocked id is still excluded by the id-scoped block semantics until a different id
+    /// is matched).
+    /// </summary>
     [HttpPost("series/{seriesId:guid}/{provider}/unblock")]
     public async Task<ActionResult> UnblockSeries(Guid seriesId, string provider, CancellationToken token)
     {
@@ -323,9 +364,15 @@ public class ExternalMappingsController : ControllerBase
             .FirstOrDefaultAsync(m => m.SeriesId == seriesId && m.Provider == providerEnum, token);
         if (mapping != null)
         {
-            mapping.MappingStatus = SeriesMappingStatus.AutoMatched;
+            mapping.MappingStatus = SeriesMappingStatus.Unmatched;
+            mapping.ExternalSeriesId = string.Empty;
+            mapping.ExternalSeriesTitle = null;
             mapping.LinkedDate = DateTime.UtcNow;
             mapping.UpdateDate = DateTime.UtcNow;
+            mapping.LinkedSitesIds = [];
+            mapping.AlternativeTitles = [];
+            mapping.SeriesCoverUrl = null;
+            mapping.MetaData = null;
             await _db.SaveChangesAsync(token);
             await SyncContributionAsync(seriesId, token);
         }
@@ -371,6 +418,76 @@ public class ExternalMappingsController : ControllerBase
     }
 
     /// <summary>
+    /// POST /api/external-mappings/series/{seriesId}/ignore-all — mark every Not Matched
+    /// (Unmatched) provider for one series as ForeverIgnored ("Ignore always"). Providers that
+    /// already carry a decision (auto/user matched, blocked, active TemporaryIgnored, or already
+    /// ForeverIgnored) are left untouched. Providers without a persisted mapping row are
+    /// synthesized as Unmatched on the page, so a ForeverIgnored row is created for them — the
+    /// same semantics as the per-provider ignore action.
+    /// </summary>
+    [HttpPost("series/{seriesId:guid}/ignore-all")]
+    public async Task<ActionResult> IgnoreAllUnmatchedSeries(Guid seriesId, CancellationToken token)
+    {
+        var series = await _db.Series.FirstOrDefaultAsync(s => s.Id == seriesId, token);
+        if (series == null) return NotFound();
+
+        var user = HttpContext.Items["User"] as UserEntity;
+        var providers = await _support.GetEnabledProvidersAsync(user, token);
+
+        var now = DateTime.UtcNow;
+        var expiryThreshold = now.AddMonths(-1); // expired TemporaryIgnored re-opens as Unmatched
+        var existing = await _db.SeriesMappings
+            .Where(m => m.SeriesId == seriesId)
+            .ToListAsync(token);
+
+        var ignored = 0;
+        foreach (var p in providers)
+        {
+            var mapping = existing.FirstOrDefault(m => m.Provider == p.ProviderType);
+
+            // No persisted row → the page synthesizes it as Unmatched → persist "Ignore always".
+            if (mapping == null)
+            {
+                _db.SeriesMappings.Add(new SeriesMappingEntity
+                {
+                    Id = Guid.NewGuid(),
+                    SeriesId = seriesId,
+                    Provider = p.ProviderType,
+                    ExternalSeriesId = string.Empty,
+                    MappingStatus = SeriesMappingStatus.ForeverIgnored,
+                    LinkedDate = now,
+                    UpdateDate = now
+                });
+                ignored++;
+                continue;
+            }
+
+            // Only Not Matched rows are ignored: Unmatched, or a TemporaryIgnored whose month
+            // has elapsed (the page treats it as Unmatched again — re-evaluation due).
+            var isUnmatched = mapping.MappingStatus == SeriesMappingStatus.Unmatched
+                || (mapping.MappingStatus == SeriesMappingStatus.TemporaryIgnored
+                    && mapping.LinkedDate != null
+                    && mapping.LinkedDate <= expiryThreshold);
+            if (!isUnmatched) continue;
+
+            mapping.MappingStatus = SeriesMappingStatus.ForeverIgnored;
+            mapping.LinkedDate = now;
+            mapping.UpdateDate = now;
+            ignored++;
+        }
+
+        if (ignored > 0)
+        {
+            await _db.SaveChangesAsync(token);
+            await SyncContributionAsync(seriesId, token);
+        }
+
+        return Ok(new { message = ignored > 0
+            ? $"Ignored {ignored} providers"
+            : "No unmatched providers to ignore" });
+    }
+
+    /// <summary>
     /// POST /api/external-mappings/scan — kick off a full metadata scan across all series.
     /// Returns immediately; the scan runs in the background and publishes live progress via
     /// SignalR (ProgressHub, jobType = MetadataLink). The response never blocks on the scan.
@@ -381,6 +498,20 @@ public class ExternalMappingsController : ControllerBase
         // Fire-and-forget in the background (own service scope) so the HTTP call returns immediately.
         _scanService.TriggerAsync().ConfigureAwait(false);
         return Ok(new { message = "Scan started" });
+    }
+
+    /// <summary>
+    /// POST /api/external-mappings/repair — run the mapping-conflict repair pass synchronously:
+    /// detect wrong auto-linkages (series claiming the same provider external id), auto-block the
+    /// losers, clear their seeded columns and recalculate links. Returns the repair summary.
+    /// </summary>
+    [HttpPost("repair")]
+    public async Task<ActionResult<MappingRepairResultDto>> Repair(CancellationToken token)
+    {
+        var repairService = HttpContext.RequestServices
+            .GetRequiredService<Services.Metadata.MappingConflictRepairService>();
+        var result = await repairService.RepairAsync(token).ConfigureAwait(false);
+        return Ok(result);
     }
 
     /// <summary>DELETE /api/external-mappings/series/{seriesId}/{provider} — remove a mapping (set Unmatched / delete row).</summary>

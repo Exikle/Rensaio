@@ -50,6 +50,7 @@ import {
   SNAPSHOT_SCHEMA_VERSION,
   SUPPORTED_ENTITY_TYPES,
 } from '../types';
+import { markPendingChanges } from './replication-service';
 
 const TITLES = 't';
 const MAPPING_TITLES = 'm';
@@ -245,6 +246,17 @@ export async function processUpload(
     }
   }
 
+  // 7. If at least one row was applied, flag pending changes so the next export
+  //    (cron or manual) publishes a new version + metadata.bin. Best-effort:
+  //    a failure to mark the flag must never fail the upload itself.
+  if (processed > 0) {
+    try {
+      await markPendingChanges(db);
+    } catch (err) {
+      console.error('Failed to mark pending changes after upload:', err);
+    }
+  }
+
   return { processed, errors };
 }
 
@@ -415,7 +427,21 @@ function buildMappingTitleStatements(
         .bind(now, now, mappingId, row.t),
     ];
   }
+  // Single-ownership rule (mapping-conflict repair): a title can only belong to ONE mapping.
+  // When a client uploads a title→mapping association for a title that was previously (wrongly)
+  // merged under a DIFFERENT mapping, archive the stale association so the title stops leaking
+  // across series. The upsert below then (re)establishes the association under the new mapping.
+  // Crucially this makes resolveMappingIds (which only reads archived_at IS NULL rows) fold
+  // future uploads of this title onto the SINGLE surviving mapping, ungluing merged titles.
+  const releaseFromOtherMappings = db
+    .prepare(
+      `UPDATE mapping_titles SET archived_at = ?, last_change = ?
+       WHERE title_id = ? AND mapping_id <> ? AND archived_at IS NULL`
+    )
+    .bind(now, now, row.t, mappingId);
+
   return [
+    releaseFromOtherMappings,
     ensureMapping,
     db
       .prepare(
@@ -595,9 +621,25 @@ function buildMetadataStatements(
         .bind(row.v, now, contributorId, mappingId, row.p, providerKey),
     ];
   }
+  // Replace semantics (mapping-conflict repair): a client that re-keyed this provider on the
+  // mapping (wrong auto-link → correct/blocked) uploads the NEW provider_key with v=0. The
+  // unique triple no longer matches the OLD row, so without this step the old (wrong) row would
+  // survive forever as a second active row. Archive the stale key first (same D1 batch), then
+  // the upsert below inserts/updates the corrected row. UserConfirmed / Blocked rows are never
+  // clobbered by a weaker re-key.
+  const archiveOldKey = db
+    .prepare(
+      `UPDATE metadata SET archived_at = ?, replication_version = ?, contributor_id = ?
+       WHERE mapping_id = ? AND provider_id = ? AND provider_key <> ?
+         AND archived_at IS NULL
+         AND mapping_status NOT IN (2, 5)`
+    )
+    .bind(now, replicationVersion, contributorId, mappingId, row.p, providerKey);
+
   // The incoming client `id` is used only when no semantic row exists yet — on
   // conflict it is KEPT (not in the SET clause). Dedup is by the triple.
   return [
+    archiveOldKey,
     ensureMapping,
     db
       .prepare(METADATA_INSERT)

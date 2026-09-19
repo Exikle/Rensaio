@@ -93,6 +93,7 @@
     <PackageReference Include="System.IdentityModel.Tokens.Jwt" Version="8.20.0" />
     <PackageReference Include="System.Threading.RateLimiting" Version="8.0.0" />
     <PackageReference Include="ModelContextProtocol.AspNetCore" Version="1.4.1" />
+    <PackageReference Include="ZstdSharp.Port" Version="0.8.8" />
   </ItemGroup>
 
 	<ItemGroup>

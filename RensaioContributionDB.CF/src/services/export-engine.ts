@@ -58,7 +58,7 @@ export async function buildMetadataBin(
   generatedUtc: string,
   aeskey256iv: string,
   compressionRaw: string | undefined
-): Promise<{ base64: string; compression: number; byteLength: number }> {
+): Promise<{ base64: string; compression: number; byteLength: number; sha256: string }> {
   const compression = resolveCompression(compressionRaw);
 
   // ── 1. Protobuf encode (streaming writer) ──
@@ -82,10 +82,15 @@ export async function buildMetadataBin(
   const encrypted = await encryptBytes(compressed.bytes, aeskey256iv);
 
   // ── 5. base64 for GitHub ──
+  // ── 6. SHA-256 of the DECODED BINARY bytes (what GitHub stores/serves), returned
+  //        base64-encoded so the export service can push it into the .sha256 sidecar.
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', encrypted));
+
   return {
     base64: bytesToBase64(encrypted),
     compression,
     byteLength: encrypted.length,
+    sha256: bytesToBase64(digest),
   };
 }
 

@@ -408,11 +408,41 @@ namespace RensaioBackend.Services.Jobs
 
         public async Task StartupAsync(CancellationToken token = default)
         {
-            // Reset running jobs to waiting on startup
-            await _db.Queues.Where(j => j.Status == QueueStatus.Running)
-                .ExecuteUpdateAsync(a => a.SetProperty(b => b.Status, QueueStatus.Waiting), token)
+            // On startup, leftover job-queue entries can only be revisited after a restart
+            // (a normal shutdown drains them). A clean re-run of a scan-type job is wasted work
+            // and can re-trigger the metadata link engine over the whole library (especially
+            // the full-link jobs). Those jobs are inherently non-idempotent across restarts and
+            // are already re-covered by the explicit startup paths (VerifyAllSeries is re-enqueued,
+            // DailyUpdate/UpdateAllSeries run on schedule) — so FAIL + clear them instead of
+            // re-executing a stale copy. Everything else is reset Running → Waiting as before.
+            var jobs = await _db.Queues
+                .Where(j => j.Status == QueueStatus.Running || j.Status == QueueStatus.Waiting)
+                .ToListAsync(token)
                 .ConfigureAwait(false);
+
+            var now = DateTime.UtcNow;
+            foreach (var job in jobs)
+            {
+                if (IsStartupDropJob(job.JobType))
+                {
+                    job.Status = QueueStatus.Failed;
+                    job.FinishedDate = now;
+                    continue;
+                }
+                if (job.Status == QueueStatus.Running)
+                    job.Status = QueueStatus.Waiting;
+            }
+            await _db.SaveChangesAsync(token).ConfigureAwait(false);
         }
+
+        /// <summary>
+        /// Job types that must NOT be auto-replayed from the queue after a restart: they are
+        /// full-library operations whose re-execution is at best wasted and at worst re-links /
+        /// re-searches the whole library (the metadata link engine) — exactly the startup storm
+        /// this guards against. They are re-triggered explicitly by the startup/schedule paths.
+        /// </summary>
+        private static bool IsStartupDropJob(JobType jobType)
+            => jobType is JobType.MetadataLink or JobType.DailyUpdate or JobType.UpdateAllSeries or JobType.VerifyAllSeries;
 
         public void DetachJob(EnqueueEntity job)
         {

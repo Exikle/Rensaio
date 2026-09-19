@@ -61,7 +61,14 @@ public class MangaUpdatesMetadataProvider : IExternalSeriesProvider
 
     public Task<bool> ValidateApiKeyAsync(string apiKey)
         => Task.FromResult(!string.IsNullOrWhiteSpace(apiKey));
-
+    public bool CanSearchSeries(List<string> genres, string? category = null)
+    {
+        if (category != null && (category.Equals("comics", StringComparison.InvariantCultureIgnoreCase)
+            || category.Equals("comic", StringComparison.InvariantCultureIgnoreCase)
+            || (category.Contains("comic", StringComparison.InvariantCultureIgnoreCase) && category.Contains("western", StringComparison.InvariantCultureIgnoreCase))))
+            return false;
+        return true;
+    }
     public Task EnsureAuthenticatedAsync(Guid userId, CancellationToken token = default)
         => Task.CompletedTask;
 

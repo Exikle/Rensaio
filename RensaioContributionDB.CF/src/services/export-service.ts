@@ -6,7 +6,9 @@
  *  3. Bump the Replication Version Number.
  *  4. Stream all active entity rows into the streamable export engine
  *     (protobuf → tag+compress → AES-256 → base64) and push the single
- *     `metadata.bin` file to the configured GitHub repository.
+ *     `metadata.bin` file to the configured GitHub repository, plus a
+ *     `metadata.bin.sha256` sidecar (base64 SHA-256 of the decoded binary)
+ *     so clients can skip the import when the file is unchanged.
  */
 import type { Env } from '../types';
 import { ARCHIVE_RETENTION_DAYS } from '../types';
@@ -18,7 +20,12 @@ import type {
   TitleEntityPayload,
 } from '../models/requests';
 import { buildMetadataBin, type ExportRowSets } from './export-engine';
-import { bumpReplicationVersion } from './replication-service';
+import {
+  bumpReplicationVersion,
+  clearPendingChanges,
+  getReplicationVersion,
+  hasPendingChanges,
+} from './replication-service';
 import { resolveCompression } from '../utils/compression';
 
 export async function runDailyExport(env: Env): Promise<{
@@ -27,6 +34,7 @@ export async function runDailyExport(env: Env): Promise<{
   files: string[];
   version: number;
   compression: number;
+  sha256: string;
   exported: boolean;
 }> {
   const scrubbed = await scrubArchived(env.DB);
@@ -35,7 +43,22 @@ export async function runDailyExport(env: Env): Promise<{
   // active references so the export stays bounded.
   const orphanTitlesArchived = await archiveOrphanTitles(env.DB);
 
-  // 3. Bump the Replication Version Number (server-side, once per day).
+  // 3. Skip the export entirely when no contributor changes are pending.
+  //    The version is only bumped (and metadata.bin only pushed) when at least
+  //    one upload / admin mutation applied rows since the last export.
+  if (!(await hasPendingChanges(env.DB))) {
+    return {
+      scrubbed,
+      orphanTitlesArchived,
+      files: [],
+      version: await getReplicationVersion(env.DB),
+      compression: -1, // nothing exported
+      sha256: '',
+      exported: false,
+    };
+  }
+
+  // 3.5 Bump the Replication Version Number only when exporting changes.
   const version = await bumpReplicationVersion(env.DB);
 
   // 4. Load all active rows.
@@ -52,17 +75,25 @@ export async function runDailyExport(env: Env): Promise<{
     env.EXPORT_COMPRESSION
   );
 
-  // Push the single file.
+  // Push the file + its SHA-256 sidecar. The sidecar holds the base64-encoded SHA-256 of the
+  // DECODED BINARY bytes (exactly what GitHub stores/serves as metadata.bin), so clients can
+  // decode the raw they pull, hash it, and skip the import when the file is unchanged.
   await pushFileToGitHub(env, 'metadata.bin', payload.base64);
+  await pushFileToGitHub(env, 'metadata.bin.sha256', payload.sha256);
+
+  // Clear the pending flag only AFTER the files were published successfully,
+  // so a failed push keeps pending_changes = 1 and the next run retries.
+  await clearPendingChanges(env.DB);
 
   const compression = resolveCompression(env.EXPORT_COMPRESSION);
 
   return {
     scrubbed,
     orphanTitlesArchived,
-    files: ['metadata.bin'],
+    files: ['metadata.bin', 'metadata.bin.sha256'],
     version,
     compression,
+    sha256: payload.sha256,
     exported: true,
   };
 }
