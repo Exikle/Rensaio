@@ -14,13 +14,14 @@ namespace RensaioBackend.Services.Contributions.Snapshot
     ///
     /// Layout (mirror of worker's utils/crypto.ts + utils/compression.ts):
     ///   - AESKEY256IV is base64(32B key + 16B IV) = 64 base64 chars.
-    ///   - After AES decrypt: byte[0] = compression tag (0x00 = ZSTD, 0x01 = Brotli),
-    ///     followed by the compressed protobuf bytes.
+    ///   - After AES decrypt: byte[0] = compression tag (0x00 = ZSTD, 0x01 = Brotli,
+    ///     0x02 = raw/uncompressed), followed by the (optionally compressed) protobuf.
     /// </summary>
     internal static class ContributionExportDecoder
     {
         public const byte TagZstd = 0x00;
         public const byte TagBrotli = 0x01;
+        public const byte TagRaw = 0x02;
 
         /// <summary>
         /// Full pipeline: AES-256-CBC decrypt → strip tag → decompress.
@@ -40,6 +41,7 @@ namespace RensaioBackend.Services.Contributions.Snapshot
             {
                 TagZstd => ZstdDecompress(body),
                 TagBrotli => BrotliDecompress(body),
+                TagRaw => body, // raw/uncompressed — worker skips compress for small payloads
                 _ => throw new InvalidDataException($"Unknown compression tag 0x{tag:X2}")
             };
         }
