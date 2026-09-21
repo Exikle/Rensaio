@@ -60,25 +60,34 @@ adminRoutes.post('/export', async (c) => {
     return c.json<ErrorResponse>({ error: validation.error }, validation.status);
   }
 
-  try {
-    const result = await runDailyExport(c.env);
-    return c.json({
-      exported: result.exported,
-      files: result.files,
-      scrubbed: result.scrubbed,
-      orphanTitlesArchived: result.orphanTitlesArchived,
-      version: result.version,
-      compression: result.compression,
-      sha256: result.sha256,
-      skippedNoChanges: !result.exported,
-    });
-  } catch (err) {
-    console.error('Manual export failed:', err);
-    return c.json<ErrorResponse>(
-      { error: `Export failed: ${err instanceof Error ? err.message : 'Unknown error'}` },
-      500
-    );
-  }
+  // The export pipeline (D1 row load → protobuf → compress → AES → base64 →
+  // GitHub push) is CPU-heavy and can exceed the synchronous fetch handler's
+  // CPU budget on large datasets (this is exactly the "Worker exceeded CPU time
+  // limit" failure). Run it in the background via ctx.waitUntil — the same
+  // mechanism the daily cron uses — and return 202 immediately. The outcome of
+  // the waitUntil'd task is only observable in worker logs.
+  c.executionCtx.waitUntil(
+    runDailyExport(c.env)
+      .then((result) => {
+        console.log(
+          `Manual export ${result.exported ? 'completed' : 'skipped (no pending changes)'}: ` +
+            `version=${result.version}, files=${result.files.join(',') || '(none)'}, ` +
+            `compression=${result.compression}, sha256=${result.sha256 || '(none)'}`
+        );
+      })
+      .catch((err) => {
+        console.error('Manual export failed:', err);
+      })
+  );
+
+  return c.json(
+    {
+      triggered: true,
+      message:
+        'Export scheduled in the background. Check worker logs for outcome (metadata.bin + metadata.bin.sha256 will appear in the GitHub repo when it succeeds).',
+    },
+    202
+  );
 });
 
 export default adminRoutes;

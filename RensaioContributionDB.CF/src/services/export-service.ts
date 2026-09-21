@@ -28,7 +28,62 @@ import {
 } from './replication-service';
 import { resolveCompression } from '../utils/compression';
 
+/**
+ * Claim the export lock (single-slot) atomically. Returns true when THIS
+ * invocation acquired it (INSERT succeeded). Concurrent invocations (cron +
+ * manual /admin/export, or double-triggered crons) that would otherwise:
+ *   - double-bump the Replication Version Number,
+ *   - race the clearPendingChanges,
+ *   - or both try to push to GitHub with a stale sha (409 conflicts)
+ * are serialized: only one run proceeds, the others become cheap no-ops.
+ */
+async function acquireExportLock(db: D1Database): Promise<boolean> {
+  const now = new Date().toISOString();
+  const res = await db
+    .prepare(
+      `INSERT OR IGNORE INTO export_lock (id, acquired_utc) VALUES (1, ?)`
+    )
+    .bind(now)
+    .run();
+  // INSERT OR IGNORE reports changes = 1 when inserted, 0 when the slot already exists.
+  return res.meta.changes === 1;
+}
+
+async function releaseExportLock(db: D1Database): Promise<void> {
+  await db.prepare('DELETE FROM export_lock WHERE id = 1').run();
+}
+
 export async function runDailyExport(env: Env): Promise<{
+  scrubbed: { sources: number; metadata: number; titles: number };
+  orphanTitlesArchived: number;
+  files: string[];
+  version: number;
+  compression: number;
+  sha256: string;
+  exported: boolean;
+}> {
+  // Serialize exports: if another run (cron/manual overlap) holds the lock,
+  // this invocation returns immediately and does NOT touch the version/flag.
+  if (!(await acquireExportLock(env.DB))) {
+    return {
+      scrubbed: { sources: 0, metadata: 0, titles: 0 },
+      orphanTitlesArchived: 0,
+      files: [],
+      version: await getReplicationVersion(env.DB),
+      compression: -1,
+      sha256: '',
+      exported: false,
+    };
+  }
+
+  try {
+    return await runExportLocked(env);
+  } finally {
+    await releaseExportLock(env.DB);
+  }
+}
+
+async function runExportLocked(env: Env): Promise<{
   scrubbed: { sources: number; metadata: number; titles: number };
   orphanTitlesArchived: number;
   files: string[];
@@ -80,6 +135,16 @@ export async function runDailyExport(env: Env): Promise<{
   // decode the raw they pull, hash it, and skip the import when the file is unchanged.
   await pushFileToGitHub(env, 'metadata.bin', payload.base64);
   await pushFileToGitHub(env, 'metadata.bin.sha256', payload.sha256);
+
+  // Stamp every active row with the version we JUST exported. Without this, a
+  // generation that was stamped with an older version (e.g. the big upload that
+  // landed at v6 but whose v6 export never pushed) would remain
+  // `replication_version < current` forever, so hasPendingChanges() would keep
+  // returning true and re-export the same dataset every day even after it is
+  // published. Stamping makes the data-derived check converge: after this run,
+  // active rows carry the current version and nothing is pending until the next
+  // upload bumps a newer version in.
+  await stampExportedRows(env.DB, version);
 
   // Clear the pending flag only AFTER the files were published successfully,
   // so a failed push keeps pending_changes = 1 and the next run retries.
@@ -205,6 +270,56 @@ export async function loadAllRows(db: D1Database): Promise<ExportRowSets> {
       v: r.replication_version ?? 0,
     })),
   };
+}
+
+/**
+ * Stamp every ACTIVE row with the replication version that was just exported.
+ *
+ * This makes the data-derived pending check (hasPendingChanges) converge:
+ * rows from a generation that was never published (e.g. uploaded at v6 but the
+ * v6 export failed to push) keep `replication_version < current` until a push
+ * actually succeeds — then they're re-stamped to `current`, so the next export
+ * is a no-op until new rows arrive. Runs in one D1 batch.
+ */
+export async function stampExportedRows(db: D1Database, exportedVersion: number): Promise<void> {
+  const now = new Date().toISOString();
+
+  // Only re-stamp rows still carrying an OLDER generation (they were just
+  // included in this export). Rows already at `exportedVersion` (freshly
+  // uploaded after the bump) are left alone — they're pending for the NEXT
+  // export, not this one.
+  await db.batch([
+    db
+      .prepare(
+        `UPDATE titles SET replication_version = ? WHERE archived_at IS NULL
+           AND (replication_version IS NULL OR (replication_version >= 0 AND replication_version < ?))`
+      )
+      .bind(exportedVersion, exportedVersion),
+    db
+      .prepare(
+        `UPDATE sources SET replication_version = ? WHERE archived_at IS NULL
+           AND (replication_version IS NULL OR (replication_version >= 0 AND replication_version < ?))`
+      )
+      .bind(exportedVersion, exportedVersion),
+    db
+      .prepare(
+        `UPDATE series SET replication_version = ? WHERE archived_at IS NULL
+           AND (replication_version IS NULL OR (replication_version >= 0 AND replication_version < ?))`
+      )
+      .bind(exportedVersion, exportedVersion),
+    db
+      .prepare(
+        `UPDATE metadata SET replication_version = ? WHERE archived_at IS NULL
+           AND (replication_version IS NULL OR (replication_version >= 0 AND replication_version < ?))`
+      )
+      .bind(exportedVersion, exportedVersion),
+  ]);
+
+  // update last_change so consumers/dashboards see the re-stamp timestamp.
+  await db
+    .prepare('UPDATE replication SET bumped_at = ? WHERE id = ?')
+    .bind(now, 1)
+    .run();
 }
 
 /**

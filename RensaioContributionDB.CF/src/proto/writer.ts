@@ -11,7 +11,12 @@
  *   fixed64 — double
  */
 
-const DEFAULT_CHUNK_SIZE = 1024 * 1024; // 1 MiB
+const DEFAULT_CHUNK_SIZE = 1024 * 1024; // 1 MiB (only for arbitrarily large payloads)
+// Start small and grow — a 1 MiB pre-allocation per nested writer (the codec
+// creates one ProtoWriter PER ROW) caused ~8.6 GB of cumulative allocation +
+// GC (which is CPU on Cloudflare) for the current dataset. With an incremental
+// buffer, memory & CPU are O(payload), not O(rows × 1 MiB).
+const INITIAL_CAPACITY = 256; // bytes
 
 /**
  * 64-bit varint of an unsigned value, little-endian base-128.
@@ -53,30 +58,40 @@ function encodeUint32(value: number): Uint8Array {
 
 /**
  * Streaming writer that appends protobuf fields into bounded chunks.
+ *
+ * Allocates INCREMENTALLY (starts at INITIAL_CAPACITY and grows geometrically)
+ * instead of pre-allocating a full 1 MiB buffer per instance. The codec creates
+ * one writer per entity row; keeping the per-row allocation O(row size) instead
+ * of O(1 MiB) is what makes the exporter scale to 10–100× the current dataset
+ * without GC-dominated CPU.
  */
 export class ProtoWriter {
   private readonly chunks: Uint8Array[] = [];
-  private current: Uint8Array = new Uint8Array(DEFAULT_CHUNK_SIZE);
+  private current: Uint8Array = new Uint8Array(INITIAL_CAPACITY);
   private offset = 0;
 
-  private flushIfNeeded(needed: number): void {
-    if (this.offset + needed <= this.current.length) return;
-    const flushLength = Math.max(this.offset, 1);
-    this.chunks.push(this.current.subarray(0, flushLength));
-    this.current = new Uint8Array(Math.max(DEFAULT_CHUNK_SIZE, needed));
-    this.offset = 0;
-  }
-
+  /** Append raw bytes (already-encoded varint/field), copying if it fits. */
   private append(bytes: Uint8Array): void {
-    this.flushIfNeeded(bytes.length);
-    if (bytes.length + this.offset > this.current.length) {
-      // single piece larger than a chunk: flush and push directly
-      const left = this.current.subarray(0, this.offset);
-      if (left.length > 0) this.chunks.push(left);
-      this.chunks.push(bytes);
-      this.current = new Uint8Array(DEFAULT_CHUNK_SIZE);
-      this.offset = 0;
-      return;
+    const needed = bytes.length;
+    if (needed + this.offset > this.current.length) {
+      // Grow geometrically (2×) to amortize allocation cost. Flush full chunks
+      // to bound memory and avoid one giant array for huge payloads.
+      if (needed + this.offset > DEFAULT_CHUNK_SIZE) {
+        // Far bigger than a chunk: flush the partial buffer and push directly
+        // (no copy), matching the old >chunk behavior.
+        const left = this.current.subarray(0, this.offset);
+        if (left.length > 0) this.chunks.push(left);
+        this.chunks.push(bytes);
+        this.current = new Uint8Array(INITIAL_CAPACITY);
+        this.offset = 0;
+        return;
+      }
+      // Grow current buffer (never shrink; reset to INITIAL for small fresh slabs).
+      let newCap = this.current.length;
+      while (newCap < needed + this.offset) newCap <<= 1;
+      const grown = new Uint8Array(Math.min(newCap, DEFAULT_CHUNK_SIZE));
+      grown.set(this.current.subarray(0, this.offset), 0);
+      this.current = grown;
     }
     this.current.set(bytes, this.offset);
     this.offset += bytes.length;
@@ -151,5 +166,11 @@ export class ProtoWriter {
     }
     out.set(this.current.subarray(0, this.offset), pos);
     return out;
+  }
+
+  /** Reuse the buffer for the next nested message (drop chunks, reset offset). */
+  reset(): void {
+    this.chunks.length = 0;
+    this.offset = 0;
   }
 }

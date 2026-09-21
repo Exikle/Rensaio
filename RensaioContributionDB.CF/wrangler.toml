@@ -21,14 +21,16 @@ crons = ["0 6 * * *"]
 [vars]
 EXPORT_GITHUB_REPO = "maxpiva/Rensaio-Metadata"
 EXPORT_PATH = "/"
-EXPORT_COMPRESSION = "0"   # 0 = ZSTD, 1 = Brotli
+# 1 = Brotli (WASM, native speed). The pure-JS ZSTD path (0) is very CPU-heavy
+# on large datasets and can trip the worker CPU limit during the export.
+EXPORT_COMPRESSION = "1"
 
 # Secrets (sensitive) — set via: wrangler secret put
 #   wrangler secret put GITHUB_TOKEN
 #   wrangler secret put AESKEY256IV   # base64(32B AES-256 key + 16B IV)
 
 [env.dev]
-vars = { EXPORT_GITHUB_REPO = "maxpiva/Rensaio-Metadata", EXPORT_PATH = "/", EXPORT_COMPRESSION = "0" }
+vars = { EXPORT_GITHUB_REPO = "maxpiva/Rensaio-Metadata", EXPORT_PATH = "/", EXPORT_COMPRESSION = "1" }
 AESKEY256IV = ""
 
 [observability]

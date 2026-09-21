@@ -25,35 +25,47 @@ export const SNAPSHOT_FIELD_SOURCES = 6;
 export const SNAPSHOT_FIELD_SERIES = 7;
 export const SNAPSHOT_FIELD_METADATA = 8;
 
+// Shared scratch writer for nested per-row messages. Each encodeX is fully
+// synchronous and consumes the scratch via finish() into the parent BEFORE the
+// next row, so reusing one instance is safe and avoids allocating a fresh
+// ProtoWriter (with its own growth buffer) per row — which is the difference
+// between O(rows × chunk) and O(payload) memory/CPU.
+const scratch = new ProtoWriter();
+
+/** Reset the shared scratch (cheap: just resets offset; buffer reused). */
+function scrub(): void {
+  scratch.reset();
+}
+
 /** Encode a TitleEntity row. */
 export function encodeTitle(w: ProtoWriter, row: TitleEntityPayload): void {
-  const m = new ProtoWriter();
-  m.string(1, row.i);
-  m.string(2, row.t);
-  m.int32(3, row.v);
-  w.message(SNAPSHOT_FIELD_TITLES, m.finish());
+  scrub();
+  scratch.string(1, row.i);
+  scratch.string(2, row.t);
+  scratch.int32(3, row.v);
+  w.message(SNAPSHOT_FIELD_TITLES, scratch.finish());
 }
 
 /** Encode a MappingTitleEntity row. */
 export function encodeMappingTitle(w: ProtoWriter, row: MappingTitleEntityPayload): void {
-  const m = new ProtoWriter();
-  m.string(1, row.m);
-  m.string(2, row.t);
-  m.int32(3, row.v);
-  w.message(SNAPSHOT_FIELD_MAPPING_TITLES, m.finish());
+  scrub();
+  scratch.string(1, row.m);
+  scratch.string(2, row.t);
+  scratch.int32(3, row.v);
+  w.message(SNAPSHOT_FIELD_MAPPING_TITLES, scratch.finish());
 }
 
 /** Encode a ContributionSourceEntity row. */
 export function encodeSource(w: ProtoWriter, row: ContributionSourceEntityPayload): void {
-  const m = new ProtoWriter();
-  m.string(1, row.i);
-  m.string(2, row.p);
-  m.int64(3, row.s);
-  m.string(4, row.n);
-  m.string(5, row.l);
-  m.string(6, row.b);
-  m.int32(7, row.v);
-  w.message(SNAPSHOT_FIELD_SOURCES, m.finish());
+  scrub();
+  scratch.string(1, row.i);
+  scratch.string(2, row.p);
+  scratch.int64(3, row.s);
+  scratch.string(4, row.n);
+  scratch.string(5, row.l);
+  scratch.string(6, row.b);
+  scratch.int32(7, row.v);
+  w.message(SNAPSHOT_FIELD_SOURCES, scratch.finish());
 }
 
 /** Encode a ContributionRecordV1 (field numbers per proto message). */
@@ -70,26 +82,26 @@ export function encodeContributionRecord(w: ProtoWriter, row: ContributionRecord
 
 /** Encode a ContributionSeriesEntity row (embeds the record). */
 export function encodeSeries(w: ProtoWriter, row: ContributionSeriesEntityPayload): void {
-  const m = new ProtoWriter();
-  m.string(1, row.i);
-  m.string(2, row.m);
-  m.string(3, row.s);
-  const rec = new ProtoWriter();
+  scrub();
+  scratch.string(1, row.i);
+  scratch.string(2, row.m);
+  scratch.string(3, row.s);
+  const rec = new ProtoWriter(); // record writer — small fields, buffer reuses scratch-sizes
   encodeContributionRecord(rec, row.d);
-  m.message(4, rec.finish());
-  m.int32(5, row.v);
-  w.message(SNAPSHOT_FIELD_SERIES, m.finish());
+  scratch.message(4, rec.finish());
+  scratch.int32(5, row.v);
+  w.message(SNAPSHOT_FIELD_SERIES, scratch.finish());
 }
 
 /** Encode a ContributionMetadataEntity row. */
 export function encodeMetadata(w: ProtoWriter, row: ContributionMetadataEntityPayload): void {
-  const m = new ProtoWriter();
-  m.string(1, row.i);
-  m.string(2, row.m);
-  m.int32(3, row.p);
-  m.string(4, row.k);
-  m.int32(5, row.s);
-  m.string(6, row.u);
-  m.int32(7, row.v);
-  w.message(SNAPSHOT_FIELD_METADATA, m.finish());
+  scrub();
+  scratch.string(1, row.i);
+  scratch.string(2, row.m);
+  scratch.int32(3, row.p);
+  scratch.string(4, row.k);
+  scratch.int32(5, row.s);
+  scratch.string(6, row.u);
+  scratch.int32(7, row.v);
+  w.message(SNAPSHOT_FIELD_METADATA, scratch.finish());
 }
