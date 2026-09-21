@@ -8,6 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { LazyImage } from "@/components/ui/lazy-image";
 import { useScrobblerMatches, useAutoMatchSeries, useSearchExternal, useConfirmMatch, useDisableLink, useRemoveMapping } from '@/lib/api/hooks/useScrobbler';
+import { useToast } from '@/hooks/use-toast';
 import { ScrobblerProvider, SeriesMappingStatus, type SeriesMatchStatus, type ConfirmMatchRequest, type DisableLinkRequest, type ScrobblerSearchResult } from '@/lib/api/types';
 import { Search, Check, X, Ban, RefreshCw } from 'lucide-react';
 
@@ -25,6 +26,7 @@ export function SeriesMatchDialog({ seriesId, provider, open, onOpenChange }: Se
   const confirmMatch = useConfirmMatch();
   const disableLink = useDisableLink();
   const removeMapping = useRemoveMapping();
+  const { toast } = useToast();
 
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<ScrobblerSearchResult[]>([]);
@@ -35,8 +37,17 @@ export function SeriesMatchDialog({ seriesId, provider, open, onOpenChange }: Se
   );
 
   const handleAutoMatch = useCallback(async () => {
-    await autoMatchSeries.mutateAsync(seriesId);
-  }, [autoMatchSeries, seriesId]);
+    try {
+      await autoMatchSeries.mutateAsync(seriesId);
+    } catch (error) {
+      console.error('Failed to auto-match series:', error);
+      toast({
+        title: 'Auto-match failed',
+        description: error instanceof Error ? error.message : 'Could not auto-match. Please try again.',
+        variant: 'destructive',
+      });
+    }
+  }, [autoMatchSeries, seriesId, toast]);
 
   const handleSearch = useCallback(async () => {
     if (!searchQuery.trim()) return;
@@ -44,10 +55,17 @@ export function SeriesMatchDialog({ seriesId, provider, open, onOpenChange }: Se
     try {
       const result = await searchExternal.mutateAsync({ provider, query: searchQuery });
       setSearchResults(result.results);
+    } catch (error) {
+      console.error('Failed to search:', error);
+      toast({
+        title: 'Search failed',
+        description: error instanceof Error ? error.message : 'Could not reach the provider. Please try again.',
+        variant: 'destructive',
+      });
     } finally {
       setIsSearching(false);
     }
-  }, [searchQuery, provider, searchExternal]);
+  }, [searchQuery, provider, searchExternal, toast]);
 
   const handleConfirm = useCallback(async (externalId: string, externalTitle?: string) => {
     const request: ConfirmMatchRequest = {
@@ -56,17 +74,44 @@ export function SeriesMatchDialog({ seriesId, provider, open, onOpenChange }: Se
       externalSeriesId: externalId,
       externalSeriesTitle: externalTitle,
     };
-    await confirmMatch.mutateAsync(request);
-  }, [seriesId, provider, confirmMatch]);
+    try {
+      await confirmMatch.mutateAsync(request);
+    } catch (error) {
+      console.error('Failed to confirm match:', error);
+      toast({
+        title: 'Failed to confirm mapping',
+        description: error instanceof Error ? error.message : 'The mapping could not be saved. Please try again.',
+        variant: 'destructive',
+      });
+    }
+  }, [seriesId, provider, confirmMatch, toast]);
 
   const handleDisable = useCallback(async () => {
     const request: DisableLinkRequest = { seriesId, provider };
-    await disableLink.mutateAsync(request);
-  }, [seriesId, provider, disableLink]);
+    try {
+      await disableLink.mutateAsync(request);
+    } catch (error) {
+      console.error('Failed to disable link:', error);
+      toast({
+        title: 'Failed to disable mapping',
+        description: error instanceof Error ? error.message : 'Could not disable the mapping. Please try again.',
+        variant: 'destructive',
+      });
+    }
+  }, [seriesId, provider, disableLink, toast]);
 
   const handleRemove = useCallback(async () => {
-    await removeMapping.mutateAsync({ seriesId, provider });
-  }, [seriesId, provider, removeMapping]);
+    try {
+      await removeMapping.mutateAsync({ seriesId, provider });
+    } catch (error) {
+      console.error('Failed to remove mapping:', error);
+      toast({
+        title: 'Failed to remove mapping',
+        description: error instanceof Error ? error.message : 'Could not remove the mapping. Please try again.',
+        variant: 'destructive',
+      });
+    }
+  }, [seriesId, provider, removeMapping, toast]);
 
   const statusBadge = (status: SeriesMappingStatus, score?: number) => {
     switch (status) {

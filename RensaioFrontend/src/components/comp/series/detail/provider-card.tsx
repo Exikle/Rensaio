@@ -17,6 +17,7 @@ import { getCountryCodeForLanguage } from "@/lib/utils/language-country-mapping"
 import { formatThumbnailUrl } from "@/lib/utils/thumbnail";
 import { ProviderMatchDialog } from "@/components/dialogs/provider-match-dialog";
 import { useSetProviderMatch } from "@/lib/api/hooks/useSeries";
+import { useToast } from "@/hooks/use-toast";
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Small relative-time helper (mirrors the format used in the cinematic mockup)
@@ -125,6 +126,7 @@ export const ProviderCard = ({
   deletedProviderStates: Record<string, boolean>;
   canEdit?: boolean;
 }) => {
+  const { toast } = useToast();
   const [isEnabled, setIsEnabled] = useState(
     !provider.isDisabled && !provider.isUninstalled,
   );
@@ -193,6 +195,11 @@ export const ProviderCard = ({
       },
       onError: (error) => {
         console.error("Failed to save match:", error);
+        toast({
+          title: "Failed to save match",
+          description: error instanceof Error ? error.message : "Could not save the match. Please try again.",
+          variant: "destructive",
+        });
       },
     });
   };

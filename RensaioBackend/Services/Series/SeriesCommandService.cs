@@ -178,6 +178,9 @@ namespace RensaioBackend.Services.Series
                     _logger.LogWarning(ex, "Failed to schedule on-add metadata automatch for series {SeriesId}", dbSeries.Id);
                 }
 
+                _logger.LogInformation("Added series '{title}' (id {SeriesId}) from {ProviderCount} provider(s).",
+                    dbSeries.Title, dbSeries.Id, existingProviders.Count);
+
                 return dbSeries.Id;
             }
             catch (Exception ex)
@@ -210,9 +213,47 @@ namespace RensaioBackend.Services.Series
             SettingsDto settings = await _settings.GetSettingsAsync(token).ConfigureAwait(false);
             string existingThumb = dbSeries.ThumbnailUrl;
 
-            // Update provider settings
-            UpdateProviderSettings(series, dbSeries);
+            // ── 1. Storage path change → physical move (before any DB mutation) ──
+            // The requested path is the *relative* storage path (e.g. "Manga/One Piece").
+            // When different from the current path, move the whole folder across the
+            // filesystem with rollback and rewrite queued download paths.
+            if (!string.IsNullOrWhiteSpace(series.StoragePath) &&
+                !string.Equals(series.StoragePath, dbSeries.StoragePath, StringComparison.Ordinal))
+            {
+                await MoveSeriesStorageAsync(dbSeries, series.StoragePath, token).ConfigureAwait(false);
+            }
 
+            // ── 2. Manual Type override ──
+            // The DTO always round-trips the current value; only overwrite when the caller
+            // explicitly supplied a non-blank type so refresh-driven nulls never erase it.
+            if (!string.IsNullOrWhiteSpace(series.Type))
+            {
+                dbSeries.Type = series.Type;
+            }
+
+            // ── 3. Manual Title semantics ──
+            // "Edit title" un-matches every source as the title provider: it clears the
+            // IsTitle flag on all sources and stores the manual title as canonical. If the
+            // user later toggles a source back to "use as title", UpdateProviderSettings
+            // re-flags it and ConsolidateDBSeriesFromProvidersAsync restores that source's
+            // title — the manual title is then replaced by the source's (source wins).
+            // To decide, look at the effectively-selected title source *after* applying the
+            // DTO's provider flags (UpdateProviderSettings runs below), because a stale DTO
+            // (e.g. an old client that still has the previously-selected source flagged) must
+            // not silently re-apply the source title over a freshly typed one.
+            UpdateProviderSettings(series, dbSeries);
+            bool anyTitleSourceAfterUpdate = dbSeries.Sources.Any(a => a.IsTitle);
+
+            if (!anyTitleSourceAfterUpdate && !string.IsNullOrWhiteSpace(series.Title))
+            {
+                // Manual title: clear every "title source" flag so a later provider refresh
+                // can never overwrite it (the refresh guard relies on "no IsTitle source").
+                foreach (SeriesProviderEntity sp in dbSeries.Sources)
+                    sp.IsTitle = false;
+                dbSeries.Title = series.Title;
+            }
+
+            // Update provider settings
             List<string> deletedSources = await _providerService.DeleteSourcesIfNeededAsync(series, dbSeries, token)
                 .ConfigureAwait(false);
             
@@ -247,7 +288,258 @@ namespace RensaioBackend.Services.Series
                 await _archiveHelper.WriteComicThumbnailAsync(dbSeries, token).ConfigureAwait(false);
             }
 
+            _logger.LogInformation("Updated series '{title}' (id {SeriesId}): paused={paused}, sources={SourceCount}, path={path}.",
+                dbSeries.Title, dbSeries.Id, series.PausedDownloads, dbSeries.Sources.Count, dbSeries.StoragePath);
+
             return dbSeries.ToSeriesExtendedInfo(settings);
+        }
+
+        /// <summary>
+        /// Moves the physical storage folder of a series to a new relative location, with rollback.
+        /// <para>
+        /// The requested <paramref name="requestedPath"/> is a *relative* storage path (e.g.
+        /// "Manga/One Piece"). The sequence is:
+        /// <list type="number">
+        /// <item>Sanitize + validate the target (reject absolute/traversal).</item>
+        /// <item>Refuse if a download for this series is currently running.</item>
+        /// <item>Rewrite queued download job parameters to the new path.</item>
+        /// <item>Move the folder (case-aware two-step for case-insensitive filesystems).</item>
+        /// <item>Relocate the hash-cache file to the new relative path.</item>
+        /// <item>Delete emptied ancestor directories of the old path (best-effort).</item>
+        /// <item>Persist the new <see cref="SeriesEntity.StoragePath"/>.</item>
+        /// </list>
+        /// Every step is rollbackable; any failure restores the folder, hash cache, DB path and
+        /// job parameters before the exception propagates.
+        /// </summary>
+        /// <param name="dbSeries">The tracked series entity (with Sources loaded).</param>
+        /// <param name="requestedPath">The requested relative storage path.</param>
+        /// <param name="token">Cancellation token.</param>
+        /// <exception cref="ArgumentException">When the path is invalid, points at another series, or a download is running.</exception>
+        private async Task MoveSeriesStorageAsync(Models.Database.SeriesEntity dbSeries, string requestedPath, CancellationToken token = default)
+        {
+            if (dbSeries == null)
+                return;
+
+            // ── 1. Sanitize + validate the requested relative path ──
+            string newRel = SeriesModelExtensions.SanitizeAndValidateStoragePath(requestedPath);
+            string oldRel = SeriesModelExtensions.NormalizeStoragePath(dbSeries.StoragePath);
+
+            if (string.Equals(newRel, oldRel, StringComparison.Ordinal))
+                return; // no-op (supports case-insensitive compare too: "same" folder)
+
+            // Refuse to move the series onto another series' storage path.
+            var otherSeriesUsingTarget = await _db.Series
+                .AsNoTracking()
+                .FirstOrDefaultAsync(s => s.Id != dbSeries.Id && s.StoragePath == newRel, token)
+                .ConfigureAwait(false);
+            if (otherSeriesUsingTarget != null)
+                throw new ArgumentException($"Target storage path '{newRel}' is already used by another series.");
+
+            SettingsDto settings = await _settings.GetSettingsAsync(token).ConfigureAwait(false);
+            string oldAbs = Path.Combine(settings.StorageFolder, oldRel);
+            string newAbs = Path.Combine(settings.StorageFolder, newRel);
+            string newParentAbs = Path.GetDirectoryName(newAbs) ?? string.Empty;
+
+            // ── 2. Guard: no in-flight downloads for this series ──
+            // DownloadCommandService serializes per-series via its own KeyedAsyncLock; waiting jobs
+            // are rewritten below, but a *running* job would write into the folder mid-move. Block.
+            bool runningDownload = await _db.Queues.AnyAsync(q =>
+                q.JobType == JobType.Download &&
+                q.ExtraKey == dbSeries.Id.ToString() &&
+                (q.Status == QueueStatus.Running || q.Status == QueueStatus.Waiting), token).ConfigureAwait(false);
+            if (runningDownload)
+                throw new ArgumentException("Cannot move the series folder while downloads are queued or running. Pause the series and retry.");
+
+            // ── 3. Rewrite waiting download job parameters (rollback snapshot) ──
+            // ChapterDownload is serialized as JobParameters; its StoragePath drives where the
+            // finished .cbz is written (DownloadCommandService line: dirPath = Storage/StoragePath).
+            var queuedDownloads = await _db.Queues
+                .Where(q => q.JobType == JobType.Download && q.ExtraKey == dbSeries.Id.ToString())
+                .ToListAsync(token).ConfigureAwait(false);
+            Dictionary<Guid, string> originalJobParams = new Dictionary<Guid, string>();
+            foreach (EnqueueEntity q in queuedDownloads)
+            {
+                originalJobParams[q.Id] = q.JobParameters ?? string.Empty;
+                if (string.IsNullOrWhiteSpace(q.JobParameters))
+                    continue;
+                try
+                {
+                    ChapterDownload? ch = JsonSerializer.Deserialize<ChapterDownload>(q.JobParameters);
+                    if (ch == null || string.IsNullOrEmpty(ch.StoragePath))
+                        continue;
+                    string chNew = ch.StoragePath;
+                    // Rewrite both relational forms: exact match of the series' old path and any
+                    // descendant (storage path is always relative, single folder per series).
+                    if (string.Equals(chNew, oldRel, StringComparison.OrdinalIgnoreCase))
+                        chNew = newRel;
+                    else if (chNew.StartsWith(oldRel + "/", StringComparison.OrdinalIgnoreCase) ||
+                             chNew.StartsWith(oldRel + "\\", StringComparison.OrdinalIgnoreCase))
+                        chNew = newRel + chNew[oldRel.Length..];
+                    if (string.Equals(chNew, ch.StoragePath, StringComparison.Ordinal))
+                        continue;
+                    ch.StoragePath = chNew;
+                    q.JobParameters = JsonSerializer.Serialize(ch);
+                    _db.Touch(q, e => e.JobParameters);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to rewrite download job {JobId} target path during series move; leaving as-is.", q.Id);
+                }
+            }
+
+            // ── 4. Move the folder (case-aware two-step) ──
+            bool movedToTemp = false;
+            bool movedToFinal = false;
+            string tempAbs = newAbs + "__rensaio_move_tmp__";
+            try
+            {
+                if (!string.Equals(oldAbs, newAbs, StringComparison.OrdinalIgnoreCase) && File.Exists(newAbs))
+                    throw new ArgumentException($"Target path '{newRel}' already exists on disk.");
+
+                if (!Directory.Exists(oldAbs))
+                {
+                    // Folder doesn't exist yet — still record the path and persist, nothing to move.
+                    _logger.LogWarning("Series {SeriesId} folder not found on disk at {OldAbs}; recording new path without moving files.", dbSeries.Id, oldAbs);
+                }
+                else
+                {
+                    if (!Directory.Exists(newParentAbs))
+                        Directory.CreateDirectory(newParentAbs);
+
+                    bool caseOnly = string.Equals(oldAbs, newAbs, StringComparison.OrdinalIgnoreCase);
+                    if (caseOnly)
+                    {
+                        Directory.Move(oldAbs, tempAbs);
+                        movedToTemp = true;
+                        try
+                        {
+                            Directory.Move(tempAbs, newAbs);
+                            movedToFinal = true;
+                        }
+                        catch (Exception rollbackSecondLeg)
+                        {
+                            // Restore the temp leg back to the original name immediately so the
+                            // folder is never stranded at the temp path.
+                            try { Directory.Move(tempAbs, oldAbs); movedToTemp = false; }
+                            catch (Exception rb) { _logger.LogError(rb, "Failed to roll back temp folder {Temp} after failed case-only folder move", tempAbs); }
+                            throw rollbackSecondLeg;
+                        }
+                    }
+                    else
+                    {
+                        Directory.Move(oldAbs, newAbs);
+                        movedToFinal = true;
+                    }
+                }
+
+                // ── 5. Relocate the hash-cache file (old rel path → new rel path) ──
+                _hashCache.RelocateSeriesHashCache(oldRel, newRel);
+
+                // ── 6. Delete emptied ancestor dirs of the old path (best-effort) ──
+                if (movedToFinal || !Directory.Exists(oldAbs))
+                {
+                    DeleteEmptyAncestors(oldAbs);
+                }
+
+                // ── 7. Persist the new path ──
+                dbSeries.StoragePath = newRel;
+                await _db.SaveChangesAsync(token).ConfigureAwait(false);
+
+                _logger.LogInformation("Moved series folder {SeriesTitle} (id {SeriesId}): {Old} -> {New}",
+                    dbSeries.Title, dbSeries.Id, oldAbs, newAbs);
+            }
+            catch (Exception ex)
+            {
+                // ── Rollback ──
+                _logger.LogError(ex, "Failed to move series folder {SeriesTitle} (id {SeriesId}): {Old} -> {New}; rolling back.", dbSeries.Title, dbSeries.Id, oldAbs, newAbs);
+
+                // 4a. Folder: reverse the move. If we're mid two-step, restore temp → old; if the
+                //     final move completed but a LATER step failed, move new → old.
+                try
+                {
+                    if (movedToTemp && !movedToFinal && Directory.Exists(tempAbs) && !Directory.Exists(oldAbs))
+                    {
+                        Directory.Move(tempAbs, oldAbs);
+                        movedToTemp = false;
+                    }
+                    else if (movedToFinal && Directory.Exists(newAbs) && !Directory.Exists(oldAbs) &&
+                        !string.Equals(newAbs, oldAbs, StringComparison.OrdinalIgnoreCase))
+                    {
+                        // Case-only: hop back through temp to survive case-insensitive filesystems.
+                        if (string.Equals(newAbs, oldAbs, StringComparison.OrdinalIgnoreCase))
+                        {
+                            Directory.Move(newAbs, tempAbs);
+                            Directory.Move(tempAbs, oldAbs);
+                        }
+                        else
+                        {
+                            Directory.Move(newAbs, oldAbs);
+                        }
+                    }
+                }
+                catch (Exception rb)
+                {
+                    _logger.LogError(rb, "Failed to restore series folder to {Old} during rollback", oldAbs);
+                }
+
+                // 5a. Hash cache: move back.
+                try
+                {
+                    _hashCache.RelocateSeriesHashCache(newRel, oldRel);
+                }
+                catch (Exception rb)
+                {
+                    _logger.LogError(rb, "Failed to restore hash cache for series {SeriesId} during rollback", dbSeries.Id);
+                }
+
+                // 3a. Restore original job parameters.
+                foreach (var kvp in originalJobParams)
+                {
+                    var q = queuedDownloads.FirstOrDefault(q => q.Id == kvp.Key);
+                    if (q != null)
+                    {
+                        q.JobParameters = kvp.Value;
+                        _db.Touch(q, e => e.JobParameters);
+                    }
+                }
+                if (originalJobParams.Count > 0)
+                {
+                    try { await _db.SaveChangesAsync(token).ConfigureAwait(false); }
+                    catch (Exception se) { _logger.LogError(se, "Failed to persist rollback of job parameters for series {SeriesId}", dbSeries.Id); }
+                }
+
+                throw; // propagate the original failure
+            }
+        }
+
+        /// <summary>
+        /// Recursively deletes empty ancestor directories of <paramref name="fullPath"/> (excluding
+        /// the storage folder root itself). Best-effort — used to clean up category folders left
+        /// empty after a series folder is moved out.
+        /// </summary>
+        private static void DeleteEmptyAncestors(string fullPath)
+        {
+            string parent = Path.GetDirectoryName(fullPath) ?? string.Empty;
+            while (!string.IsNullOrEmpty(parent) && parent != "." && parent != "/" && parent != "\\")
+            {
+                try
+                {
+                    if (!Directory.Exists(parent))
+                        break;
+                    var entries = Directory.GetFileSystemEntries(parent);
+                    if (entries.Length > 0)
+                        break; // not empty — stop here
+                    Directory.Delete(parent, false);
+                }
+                catch (Exception)
+                {
+                    break; // can't delete (locked/permission) — stop ascending
+                }
+                string next = Path.GetDirectoryName(parent) ?? string.Empty;
+                if (string.Equals(next, parent, StringComparison.Ordinal))
+                    break;
+                parent = next;
+            }
         }
 
         /// <summary>
@@ -268,8 +560,12 @@ namespace RensaioBackend.Services.Series
                 .FirstOrDefaultAsync(s => s.Id == id, token).ConfigureAwait(false);
             if (dbSeries == null)
             {
+                _logger.LogWarning("Cannot delete series with ID {SeriesId}: not found.", id);
                 throw new KeyNotFoundException($"Series with ID {id} not found");
             }
+
+            _logger.LogInformation("Deleting series '{title}' (id {SeriesId}) alsoPhysical={alsoPhysical}.",
+                dbSeries.Title, id, alsoPhysical);
 
             List<string> deletedSeries = dbSeries.Sources
                 .Select(a => a.MihonId)
@@ -301,6 +597,9 @@ namespace RensaioBackend.Services.Series
                 [], deletedSeries, token).ConfigureAwait(false);
             
             await _db.SaveChangesAsync(token).ConfigureAwait(false);
+
+            _logger.LogInformation("Deletion of series '{title}' (id {SeriesId}) complete; {Mappings} mappings removed.",
+                dbSeries.Title, id, mappingsToRemove.Count);
         }
 
         
@@ -315,6 +614,11 @@ namespace RensaioBackend.Services.Series
             {
                 Dictionary<string, (DateTime, Manga?, ParsedChapter?)> latestDates = await _db.LatestSeries.Where(a => a.MihonProviderId == mihonProviderId).ToDictionaryAsync(a => a.MihonId, a => (a.FetchDate, a.ToManga(), a.Chapters.OrderByDescending(b => b.Index).FirstOrDefault()), token).ConfigureAwait(false);
                 ConcurrentDictionary<string, ComboSeries> newChaps = [];
+                // Aggregated per-run diagnostics so the caller (and the log reader) can see the
+                // outcome of the whole provider refresh in a single line instead of one line per
+                // failed title. Purely additive; the individual per-call errors are still logged.
+                ConcurrentDictionary<string, int> failureBreakdown = [];
+                long fetchedSeries = 0;
                 int page = 1;
                 bool upToDate = false;
                 bool neverDone = latestDates.Count == 0;
@@ -373,9 +677,10 @@ namespace RensaioBackend.Services.Series
                             {
                                 MangaUpdate? update = await _mihon.MihonErrorWrapperLockedAsync(
                                     () => src.GetDetailsAndChaptersAsync(ss, token),
-                                    "Unable to get Series {Title} from {provider}", mangaLockKey, ss.Title, provider).ConfigureAwait(false);
+                                    "Unable to get Series {Title} from {provider}", mangaLockKey, failureBreakdown, ss.Title, provider).ConfigureAwait(false);
                                 if (update == null)
                                     return;
+                                fetchedSeries++;
                                 combo.Series = update.Manga;
                                 combo.Chapters = update.Chapters;
                                 newChaps[mihonId] = combo;
@@ -387,12 +692,13 @@ namespace RensaioBackend.Services.Series
                                 // same-manga lock to avoid racing a library GetChapters job.
                                 List<ParsedChapter>? chaps = await _mihon.MihonErrorWrapperLockedAsync(
                                     () => src.GetChaptersAsync(ss, token),
-                                    "Unable to get Series {Title} Chapters from {provider}", mangaLockKey, ss.Title, provider).ConfigureAwait(false);
+                                    "Unable to get Series {Title} Chapters from {provider}", mangaLockKey, failureBreakdown, ss.Title, provider).ConfigureAwait(false);
                                 if (chaps == null)
                                 {
                                     newChaps.Remove(mihonId, out _);
                                     return;
                                 }
+                                fetchedSeries++;
                                 combo.Chapters = chaps;
                                 newChaps[mihonId] = combo;
                             }
@@ -473,7 +779,19 @@ namespace RensaioBackend.Services.Series
                         }
                     }
                 }
-                _logger.LogInformation("Latest Series update from Provider {provider} complete.", provider);
+                _logger.LogInformation(
+                    "Latest Series update from Provider {provider} complete. Pages scanned: {pages}, series fetched: {fetched}, failed: {failed}, up to date: {upToDate}",
+                    provider, page - 1, fetchedSeries, failureBreakdown.Count, upToDate);
+
+                // One aggregated line for the run's failures (if any) so the failure picture
+                // survives triage without scrolling through every per-title error above.
+                if (failureBreakdown.Count > 0)
+                {
+                    _logger.LogWarning(
+                        "Latest Series update from Provider {provider} completed with {count} failures: {breakdown}.",
+                        provider, failureBreakdown.Count,
+                        string.Join(", ", failureBreakdown.Select(kv => $"{kv.Key}: {kv.Value}")));
+                }
 
                 return JobResult.Success;
             }
@@ -568,6 +886,9 @@ namespace RensaioBackend.Services.Series
                 return JobResult.Failed;
             }
 
+            _logger.LogInformation("Fetched {count} chapters for Series {series} from Provider {provider}.",
+                chapterData.Count, serie.Title, provider);
+
             // Success — reset error tracking
             serie.ConsecutiveErrorCount = 0;
             serie.LastSuccessfulFetchDate = DateTime.UtcNow;
@@ -588,11 +909,10 @@ namespace RensaioBackend.Services.Series
 
                     // Update the series-level metadata.
                     // Only the provider flagged as the title source may overwrite the canonical
-                    // series title; otherwise a per-provider refresh would clobber the selected
-                    // title with whichever provider refreshed last. When no provider is flagged
-                    // as the title source, preserve the upstream behaviour of taking the title.
-                    if (!string.IsNullOrEmpty(extensionManga.Title) &&
-                        (serie.IsTitle || !series.Sources.Any(x => x.IsTitle)))
+                    // series title. When NO provider is flagged as the title source the title is
+                    // a *manual* title (set via "Edit title" on the series page) and must never
+                    // be clobbered by a background refresh.
+                    if (!string.IsNullOrEmpty(extensionManga.Title) && serie.IsTitle)
                         series.Title = extensionManga.Title;
                     if (!string.IsNullOrEmpty(extensionManga.Artist))
                         series.Artist = extensionManga.Artist;
@@ -667,19 +987,32 @@ namespace RensaioBackend.Services.Series
             // otherwise bypass the pause flag — guarding here closes every such path.
             if (series.PauseDownloads)
             {
+                _logger.LogInformation(
+                    "GetChapters refresh of Series {series} from Provider {provider} complete: {chapterCount} chapters fetched (status {status}), downloads skipped (paused).",
+                    serie.Title, provider, chapterData.Count, serie.LastKnownStatus);
                 _logger.LogInformation("Series {series} is paused; metadata refreshed but skipping chapter downloads", serie.Title);
                 return JobResult.Success;
             }
 
             List<ChapterDownload> chaps = series.GenerateDownloadsFromChapterData(serie, chapterData);
+            int newCount = chaps.Count(a => !a.IsUpdate);
+            int updateCount = chaps.Count(a => a.IsUpdate);
 
-            // Respect the series pause flag — don't queue downloads when paused
-            if (!series.PauseDownloads)
+            JobResult result = await _downloadCommand.QueueChapterDownloadsAsync(serie, chaps, token).ConfigureAwait(false);
+            if (chaps.Count > 0)
             {
-                return await _downloadCommand.QueueChapterDownloadsAsync(serie, chaps, token).ConfigureAwait(false);
+                _logger.LogInformation(
+                    "GetChapters refresh of Series {series} from Provider {provider} complete: {chapterCount} chapters fetched (status {status}), queued {newCount} new and {updateCount} updated chapter download(s).",
+                    serie.Title, provider, chapterData.Count, serie.LastKnownStatus, newCount, updateCount);
+            }
+            else
+            {
+                _logger.LogInformation(
+                    "GetChapters refresh of Series {series} from Provider {provider} complete: {chapterCount} chapters fetched (status {status}), no new chapters to download.",
+                    serie.Title, provider, chapterData.Count, serie.LastKnownStatus);
             }
 
-            return JobResult.Success;
+            return result;
         }
 
         /// <summary>
@@ -733,11 +1066,19 @@ namespace RensaioBackend.Services.Series
             Models.Database.SeriesEntity? series = await _db.Series.Include(a => a.Sources)
                 .FirstOrDefaultAsync(s => s.Id == seriesId, token).ConfigureAwait(false);
             if (series == null)
+            {
+                _logger.LogWarning("Redownload of chapter {Chapter} of series {SeriesId}: series not found.",
+                    chapterNumber, seriesId);
                 return new RedownloadResult(RedownloadOutcome.SeriesNotFound);
+            }
 
             // Pause is authoritative — block explicit re-downloads while the series is paused.
             if (series.PauseDownloads)
+            {
+                _logger.LogWarning("Redownload of chapter {Chapter} of series '{title}': series is paused.",
+                    chapterNumber, series.Title);
                 return new RedownloadResult(RedownloadOutcome.Paused);
+            }
 
             bool HasChapter(SeriesProviderEntity p) =>
                 p.Chapters.Any(c => !c.IsDeleted && c.Number == chapterNumber);
@@ -750,7 +1091,11 @@ namespace RensaioBackend.Services.Series
             {
                 target = series.Sources.FirstOrDefault(p => p.Id == providerId.Value);
                 if (target == null || !Capable(target))
+                {
+                    _logger.LogWarning("Redownload of chapter {Chapter} of series '{title}': no capable source available.",
+                        chapterNumber, series.Title);
                     return new RedownloadResult(RedownloadOutcome.NoSourceAvailable);
+                }
             }
             else
             {
@@ -760,7 +1105,11 @@ namespace RensaioBackend.Services.Series
                     ?? candidates.FirstOrDefault(p => p.Chapters.Any(c => c.Number == chapterNumber && !string.IsNullOrEmpty(c.Filename)))
                     ?? candidates.FirstOrDefault();
                 if (target == null)
+                {
+                    _logger.LogWarning("Redownload of chapter {Chapter} of series '{title}': no source offers the chapter.",
+                        chapterNumber, series.Title);
                     return new RedownloadResult(RedownloadOutcome.NoSourceAvailable);
+                }
             }
 
             // Re-fetch the live chapter list so the download uses a fresh URL.
@@ -781,7 +1130,11 @@ namespace RensaioBackend.Services.Series
                 () => src.GetChaptersAsync(targetManga, token),
                 "Unable to get Chapters from {series} from {provider}", targetLockKey, series.Title, target.Provider).ConfigureAwait(false);
             if (chapterData == null || chapterData.Count == 0)
+            {
+                _logger.LogWarning("Redownload of chapter {Chapter} of series '{title}': chapter not found in live chapter list.",
+                    chapterNumber, series.Title);
                 return new RedownloadResult(RedownloadOutcome.ChapterNotFound);
+            }
 
             // Apply the same scanlator scoping the bulk download path uses.
             chapterData.ForEach(a =>
@@ -797,7 +1150,11 @@ namespace RensaioBackend.Services.Series
 
             ParsedChapter? match = pool.FirstOrDefault(c => c.ParsedNumber == chapterNumber);
             if (match == null)
+            {
+                _logger.LogWarning("Redownload of chapter {Chapter} of series '{title}': chapter not found after scanlator scoping.",
+                    chapterNumber, series.Title);
                 return new RedownloadResult(RedownloadOutcome.ChapterNotFound);
+            }
 
             // Remove any existing on-disk copy of this chapter (held by whichever source) and reset
             // its row, so the fresh download replaces it instead of leaving an orphan or duplicate.

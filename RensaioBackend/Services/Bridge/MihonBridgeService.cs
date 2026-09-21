@@ -59,7 +59,15 @@ namespace RensaioBackend.Services.Bridge
         /// <see cref="MihonErrorWrapperLockedAsync"/> for the same-manga-locked variant.
         /// </summary>
         public async Task<T?> MihonErrorWrapperAsync<T>(Func<Task<T>> func, string errorMessage, params object[] pars) where T : class, new()
-            => await MihonErrorWrapperCoreAsync(func, errorMessage, null, pars).ConfigureAwait(false);
+            => await MihonErrorWrapperCoreAsync(func, errorMessage, null, null, pars).ConfigureAwait(false);
+
+        /// <summary>
+        /// Like <see cref="MihonErrorWrapperAsync"/>, but additionally records each HTTP failure
+        /// status into the supplied <paramref name="failureBreakdown"/> map so bulk callers can
+        /// aggregate per-run failures. Purely diagnostic — the per-call error still gets logged.
+        /// </summary>
+        public async Task<T?> MihonErrorWrapperAsync<T>(Func<Task<T>> func, string errorMessage, ConcurrentDictionary<string, int>? failureBreakdown, params object[] pars) where T : class, new()
+            => await MihonErrorWrapperCoreAsync(func, errorMessage, null, failureBreakdown, pars).ConfigureAwait(false);
 
         /// <summary>
         /// Like <see cref="MihonErrorWrapperAsync"/>, but additionally serializes the call on a
@@ -69,9 +77,18 @@ namespace RensaioBackend.Services.Bridge
         /// bounds total concurrency, so same-manga calls must queue on this keyed lock instead.
         /// </summary>
         public async Task<T?> MihonErrorWrapperLockedAsync<T>(Func<Task<T>> func, string errorMessage, string lockKey, params object[] pars) where T : class, new()
-            => await MihonErrorWrapperCoreAsync(func, errorMessage, lockKey, pars).ConfigureAwait(false);
+            => await MihonErrorWrapperCoreAsync(func, errorMessage, lockKey, null, pars).ConfigureAwait(false);
 
-        private async Task<T?> MihonErrorWrapperCoreAsync<T>(Func<Task<T>> func, string errorMessage, string? lockKey, params object[] pars) where T : class, new()
+        /// <summary>
+        /// Like <see cref="MihonErrorWrapperLockedAsync"/>, but additionally records each HTTP
+        /// failure status into the supplied <paramref name="failureBreakdown"/> map so bulk
+        /// callers can aggregate per-run failures. Purely diagnostic — the per-call error still
+        /// gets logged.
+        /// </summary>
+        public async Task<T?> MihonErrorWrapperLockedAsync<T>(Func<Task<T>> func, string errorMessage, string lockKey, ConcurrentDictionary<string, int>? failureBreakdown, params object[] pars) where T : class, new()
+            => await MihonErrorWrapperCoreAsync(func, errorMessage, lockKey, failureBreakdown, pars).ConfigureAwait(false);
+
+        private async Task<T?> MihonErrorWrapperCoreAsync<T>(Func<Task<T>> func, string errorMessage, string? lockKey, ConcurrentDictionary<string, int>? failureBreakdown, params object[] pars) where T : class, new()
         {
             // Serialize same-manga calls per (provider+manga); non-manga calls (search page,
             // latest page, images) pass lockKey=null and are only bounded by the global gate.
@@ -103,6 +120,8 @@ namespace RensaioBackend.Services.Bridge
                         //    when their bot/rate-limit detection triggers.
                         if (IsRetryableHttpStatus(status) && attempt < DefaultMaxRetries)
                         {
+                            _logger.LogDebug("Retrying {ErrorMessage} (attempt {Attempt}/{Max}) after {Delay}s",
+                                errorMessage, attempt + 1, DefaultMaxRetries, ComputeBackoff(attempt).TotalSeconds);
                             await Task.Delay(ComputeBackoff(attempt)).ConfigureAwait(false);
                             continue;
                         }
@@ -111,6 +130,12 @@ namespace RensaioBackend.Services.Bridge
                         Array.Resize(ref pars2, pars2.Length + 1);
                         pars2[^1] = status;
                         _logger.LogError(errorMessage + " Http Error: {httperror}", pars2);
+                        if (failureBreakdown != null)
+                        {
+                            string reason = status.ToString();
+                            int current = (int?)failureBreakdown[reason] ?? 0;
+                            failureBreakdown[reason] = current + 1;
+                        }
                         return null;
                     }
                     catch (TaskCanceledException)

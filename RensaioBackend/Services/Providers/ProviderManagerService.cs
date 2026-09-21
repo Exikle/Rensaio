@@ -415,6 +415,8 @@ namespace RensaioBackend.Services.Providers
                 combo.AutoUpdate = autoUpdate;
                 combo = await _mihon.SetActiveExtensionVersionAsync(combo, token).ConfigureAwait(false);
                 await _providerCache.RefreshCacheAsync(false, token).ConfigureAwait(false);
+                _logger.LogInformation("Activated provider {PkgName} version {version} (autoUpdate={autoUpdate}).",
+                    pkgName, version, autoUpdate);
                 return true;
             }
             catch (Exception ex)

@@ -284,6 +284,60 @@ public class HashCacheService
     }
 
     /// <summary>
+    /// Relocates a series' hash-cache file on disk from <paramref name="oldStoragePath"/> to
+    /// <paramref name="newStoragePath"/> after the series folder is moved, and drops the stale
+    /// in-memory entry so the next lookup reloads from the new location. No-op when the old
+    /// hash file doesn't exist.
+    /// </summary>
+    /// <param name="oldStoragePath">The previous relative series storage path.</param>
+    /// <param name="newStoragePath">The new relative series storage path.</param>
+    public void RelocateSeriesHashCache(string oldStoragePath, string newStoragePath)
+    {
+        try
+        {
+            string oldHashPath = GetSeriesHashPath(oldStoragePath);
+            string newHashPath = GetSeriesHashPath(newStoragePath);
+            string oldKey = NormalizeSeriesPath(oldStoragePath);
+            string newKey = NormalizeSeriesPath(newStoragePath);
+
+            if (string.Equals(oldHashPath, newHashPath, StringComparison.Ordinal))
+            {
+                // Case-only rename of the whole path maps to the same hash file — nothing to move.
+                // Still swap the memory key so lookups under the new path hit the cache.
+                if (!string.Equals(oldKey, newKey, StringComparison.Ordinal))
+                {
+                    if (_memoryCache.TryGetValue(oldKey, out var entry))
+                    {
+                        _memoryCache.TryRemove(oldKey, out _);
+                        _memoryCache[newKey] = entry;
+                    }
+                }
+                return;
+            }
+
+            if (!File.Exists(oldHashPath))
+                return; // nothing stored yet — nothing to move
+
+            string? newParent = System.IO.Path.GetDirectoryName(newHashPath);
+            if (!string.IsNullOrEmpty(newParent) && !Directory.Exists(newParent))
+                Directory.CreateDirectory(newParent);
+
+            if (File.Exists(newHashPath))
+                File.Delete(newHashPath); // stale zero-length/duplicate target — replace
+            File.Move(oldHashPath, newHashPath);
+
+            // Drop both memory keys so the next access reloads from the new location.
+            _memoryCache.TryRemove(oldKey, out _);
+            _memoryCache.TryRemove(newKey, out _);
+        }
+        catch (Exception ex)
+        {
+            // Hash relocation is best-effort: a stale entry only costs a recompute.
+            System.Console.Error.WriteLine("Failed to relocate hash cache from {0} to {1}: {2}", oldStoragePath, newStoragePath, ex.Message);
+        }
+    }
+
+    /// <summary>
     /// Evicts the oldest (lowest-revision) series entries once the in-memory cache exceeds the
     /// cap. The hash JSON on disk remains the source of truth; evicted series reload on access.
     /// </summary>

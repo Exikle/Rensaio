@@ -439,6 +439,13 @@ namespace RensaioBackend.Controllers
                 await _thumb.PopulateThumbsAsync(series.Providers, "/api/image/", token).ConfigureAwait(false);
                 return Ok(series);
             }
+            catch (ArgumentException ex)
+            {
+                // Validation/business-rule errors (e.g. invalid or colliding storage path, or
+                // a folder move attempted while downloads are queued) are client errors → 400.
+                _logger.LogWarning("Series update rejected: {Message}", ex.Message);
+                return BadRequest(new { error = ex.Message });
+            }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error updating series: {Message}", ex.Message);

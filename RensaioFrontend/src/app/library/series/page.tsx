@@ -28,6 +28,7 @@ import { SeriesHero } from "@/components/comp/series/detail/series-hero";
 import { SourcesSection } from "@/components/comp/series/detail/sources-section";
 import { ChaptersSection } from "@/components/comp/series/detail/chapters-section";
 import { SeriesRibbon } from "@/components/comp/series/detail/series-ribbon";
+import { EditSeriesDialog } from "@/components/comp/series/detail/edit-series-dialog";
 
 
 
@@ -85,6 +86,10 @@ function SeriesPageContent() {
 
   // Rename (fix folder + .cbz names) confirmation dialog state
   const [showRenameDialog, setShowRenameDialog] = useState(false);
+
+  // Edit (title / type / storage path) dialog state
+  const [showEditDialog, setShowEditDialog] = useState(false);
+  const [editSaving, setEditSaving] = useState(false);
   
   // Track user activity for periodic refresh logic
   const lastActivityRef = useRef<number>(Date.now());
@@ -901,6 +906,97 @@ function SeriesPageContent() {
     }
   };
 
+  // Handler for saving edits (title / type / storage path) from the Edit Series dialog.
+  // Title semantics: overriding the title makes it a *manual* title, which requires sending
+  // every provider with useTitle=false so the backend detaches all title sources (the manual
+  // title then wins and survives refreshes). If the title is unchanged, existing title-source
+  // toggles are preserved.
+  const handleEditSave = async ({ title: nextTitle, type: nextType, storagePath: nextPath }: {
+    title: string;
+    type: string;
+    storagePath: string;
+  }) => {
+    if (!series || isDeleting) return;
+
+    const titleChanged = nextTitle !== (series.title ?? '');
+    const typeChanged = nextType !== (series.type ?? '');
+    const pathChanged = nextPath !== (series.storagePath ?? '');
+
+    if (!titleChanged && !typeChanged && !pathChanged) {
+      setShowEditDialog(false);
+      return;
+    }
+
+    setEditSaving(true);
+    try {
+      // When the title is edited, detach every source as the title provider so the backend
+      // stores the manual title and never lets a metadata refresh overwrite it.
+      const updatedSeries = {
+        ...series,
+        title: nextTitle,
+        type: nextType || series.type, // keep existing when blanked
+        storagePath: nextPath,
+        providers: series.providers.map(provider => ({
+          ...provider,
+          useTitle: titleChanged ? false : (providerSwitches[provider.id]?.useTitle ?? provider.useTitle),
+          useCover: providerSwitches[provider.id]?.useCover ?? provider.useCover,
+          isStorage: providerSwitches[provider.id]?.useStorage ?? provider.isStorage,
+          isDisabled: provider.isUninstalled ? true : (providerDisabledStates[provider.id] ?? provider.isDisabled),
+          isDeleted: providerDeletedStates[provider.id] ?? false,
+          fromChapter: providerFromChapters[provider.id] !== undefined
+            ? parseFloat(providerFromChapters[provider.id] || "0")
+            : provider.fromChapter,
+        })),
+      };
+
+      const result = await updateSeriesMutation.mutateAsync(updatedSeries);
+
+      // Re-sync local provider switches from the backend response (e.g. cleared title flags).
+      if (result && result.providers) {
+        const newSwitches: Record<string, { useTitle: boolean; useCover: boolean; useStorage: boolean }> = {};
+        const newDisabledStates: Record<string, boolean> = {};
+        const newFromChapters: Record<string, string> = {};
+        result.providers.forEach((provider) => {
+          newSwitches[provider.id] = {
+            useTitle: provider.useTitle ?? false,
+            useCover: provider.useCover ?? false,
+            useStorage: provider.isStorage ?? false,
+          };
+          newDisabledStates[provider.id] = provider.isUninstalled ? true : (provider.isDisabled ?? false);
+          newFromChapters[provider.id] = provider.fromChapter?.toString() || "";
+        });
+        setProviderSwitches(newSwitches);
+        setProviderDisabledStates(newDisabledStates);
+        setProviderFromChapters(newFromChapters);
+      }
+
+      // The PATCH hook already fills the detail cache and invalidates the library; account for
+      // a possible storage-path change by invalidating the detail cache explicitly too.
+      await queryClient.invalidateQueries({ queryKey: ['series', 'detail', series.id] });
+      await queryClient.invalidateQueries({ queryKey: ['series', 'library'] });
+
+      setShowEditDialog(false);
+      toast({
+        variant: "success",
+        title: "Series updated",
+        description: pathChanged
+          ? "Title/type updated and the storage folder was moved."
+          : "Series details updated.",
+      });
+    } catch (error) {
+      console.error('Failed to edit series:', error);
+      toast({
+        variant: "destructive",
+        title: "Save failed",
+        description: error instanceof Error
+          ? error.message
+          : "Could not save the series edits. Please try again.",
+      });
+    } finally {
+      setEditSaving(false);
+    }
+  };
+
   // Handler for verify success dialog close
   const handleVerifyDialogClose = async () => {
     setShowVerifyDialog(false);
@@ -1192,6 +1288,7 @@ function SeriesPageContent() {
         onVerify={handleVerifyIntegrityClick}
         onRefresh={handleRefreshClick}
         onRename={handleRenameClick}
+        onEdit={() => setShowEditDialog(true)}
         onDelete={handleDeleteSeriesClick}
       />
 
@@ -1411,5 +1508,14 @@ function SeriesPageContent() {
         </DialogContent>
       </Dialog>
     )}
+
+    {/* Edit Series Dialog — title / type / storage path */}
+    <EditSeriesDialog
+      open={showEditDialog}
+      series={series}
+      isSaving={editSaving}
+      onOpenChange={setShowEditDialog}
+      onSave={handleEditSave}
+    />
   </>  );
 }

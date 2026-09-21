@@ -447,6 +447,10 @@ namespace RensaioBackend.Services.Downloads
             string groupKey = $"{download.MihonId}";
             DateTime nextTime = DateTime.UtcNow.Add(appSettings.ChapterDownloadFailRetryTime);
             await _jobManagementService.ScheduleJobAsync(JobType.Download, download, nextTime, "Downloads", key, groupKey, download.SeriesId.ToString(), Priority.Normal, download.Retries, token).ConfigureAwait(false);
+
+            _logger.LogWarning("Scheduled retry {Retries}/{MaxRetries} of chapter {ChapterNumber} of series {SeriesTitle} in {DelaySeconds}s.",
+                download.Retries, appSettings.ChapterDownloadFailRetries, download.Chapter.ChapterNumber, download.Title,
+                appSettings.ChapterDownloadFailRetryTime.TotalSeconds);
             return JobResult.Handled;
         }
     }

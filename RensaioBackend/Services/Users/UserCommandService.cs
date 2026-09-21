@@ -15,13 +15,15 @@ public class UserCommandService
     private readonly PasswordService _passwordService;
     private readonly OpdsPathGenerator _opdsPathGenerator;
     private readonly UserQueryService _userQueryService;
+    private readonly ILogger<UserCommandService> _logger;
 
-    public UserCommandService(AppDbContext db, PasswordService passwordService, OpdsPathGenerator opdsPathGenerator, UserQueryService userQueryService)
+    public UserCommandService(AppDbContext db, PasswordService passwordService, OpdsPathGenerator opdsPathGenerator, UserQueryService userQueryService, ILogger<UserCommandService> logger)
     {
         _db = db;
         _passwordService = passwordService;
         _opdsPathGenerator = opdsPathGenerator;
         _userQueryService = userQueryService;
+        _logger = logger;
     }
 
     /// <summary>
@@ -47,6 +49,8 @@ public class UserCommandService
 
         _db.Users.Add(user);
         await _db.SaveChangesAsync(token);
+
+        _logger.LogInformation("User '{username}' created (level {Level}).", username, level);
         return user;
     }
 
@@ -59,6 +63,8 @@ public class UserCommandService
         user.Salt = salt;
         user.PasswordSetToken = null; // Clear any pending invite token
         await _db.SaveChangesAsync(token);
+
+        _logger.LogInformation("Password set for user '{username}'.", user.Username);
     }
 
     /// <summary>
@@ -75,6 +81,8 @@ public class UserCommandService
         user.PasswordHash = _passwordService.HashPassword(newPassword, out string salt);
         user.Salt = salt;
         await _db.SaveChangesAsync(token);
+
+        _logger.LogInformation("Password changed for user '{username}'.", user.Username);
         return true;
     }
 
@@ -107,6 +115,9 @@ public class UserCommandService
         }
 
         await _db.SaveChangesAsync(token);
+
+        _logger.LogInformation("User '{username}' updated: level={level}, active={isActive}.",
+            user.Username, level, isActive);
     }
 
     /// <summary>
@@ -116,6 +127,8 @@ public class UserCommandService
     {
         _db.Users.Remove(user);
         await _db.SaveChangesAsync(token);
+
+        _logger.LogInformation("User '{username}' deleted.", user.Username);
     }
 
     /// <summary>
@@ -128,6 +141,8 @@ public class UserCommandService
 
         user.Level = UserLevel.Owner;
         await _db.SaveChangesAsync(token);
+
+        _logger.LogInformation("User '{username}' promoted to owner.", user.Username);
     }
 
     /// <summary>
@@ -157,6 +172,8 @@ public class UserCommandService
         user.RefreshTokenHash = null;
         user.RefreshTokenExpiresAt = null;
         await _db.SaveChangesAsync(token);
+
+        _logger.LogInformation("Refresh token cleared for user '{username}'.", user.Username);
     }
 
     /// <summary>
@@ -167,6 +184,8 @@ public class UserCommandService
         string newPath = await _opdsPathGenerator.GenerateUniquePathAsync();
         user.OpdsPath = newPath;
         await _db.SaveChangesAsync(token);
+
+        _logger.LogInformation("OPDS path regenerated for user '{username}'.", user.Username);
         return newPath;
     }
 }

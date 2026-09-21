@@ -5,6 +5,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, Di
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useSearchExternal, useConfirmMatch, useScrobblerConfigs } from '@/lib/api/hooks/useScrobbler';
+import { useToast } from '@/hooks/use-toast';
 import { ScrobblerProvider, type ScrobblerSearchResult } from '@/lib/api/types';
 import { Search, Check } from 'lucide-react';
 import { LazyImage } from "@/components/ui/lazy-image";
@@ -47,6 +48,7 @@ export function ScrobblerSearchRequester({
 }: ScrobblerSearchRequesterProps) {
   const searchExternal = useSearchExternal();
   const confirmMatch = useConfirmMatch();
+  const { toast } = useToast();
   const { data: configs } = useScrobblerConfigs();
   const imageTemplateUrl = configs?.find(c => c.provider === provider)?.imageTemplateUrl;
 
@@ -67,10 +69,17 @@ export function ScrobblerSearchRequester({
       const result = await searchExternal.mutateAsync({ provider, query: searchQuery });
       setSearchResults(result.results);
       setHasSearched(true);
+    } catch (error) {
+      console.error('Failed to search:', error);
+      toast({
+        title: 'Search failed',
+        description: error instanceof Error ? error.message : 'Could not reach the provider. Please try again.',
+        variant: 'destructive',
+      });
     } finally {
       setIsSearching(false);
     }
-  }, [searchQuery, provider, searchExternal]);
+  }, [searchQuery, provider, searchExternal, toast]);
 
   const handleConfirm = useCallback(async () => {
     if (selectedId == null) return;
@@ -91,10 +100,17 @@ export function ScrobblerSearchRequester({
         });
       }
       onOpenChange(false);
+    } catch (error) {
+      console.error('Failed to confirm match:', error);
+      toast({
+        title: 'Failed to confirm mapping',
+        description: error instanceof Error ? error.message : 'The mapping could not be saved. Please try again.',
+        variant: 'destructive',
+      });
     } finally {
       setIsConfirming(false);
     }
-  }, [selectedId, searchResults, seriesId, provider, confirmMatch, onConfirm, onOpenChange]);
+  }, [selectedId, searchResults, seriesId, provider, confirmMatch, onConfirm, onOpenChange, toast]);
 
   // Reset state when dialog opens and prefill search with series title
   const hasAutoSearched = useRef(false);

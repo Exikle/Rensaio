@@ -26,7 +26,7 @@ namespace RensaioBackend.Services.Jobs
 
         #region Series Provider Job Management
 
-        public async Task ManageSeriesProviderJobAsync(SeriesProviderEntity provider, bool runNow = false, 
+        public async Task ManageSeriesProviderJobAsync(SeriesProviderEntity provider, bool runNow = false,
             bool forceDisable = false, CancellationToken token = default)
         {
             string groupKey = BuildProviderGroupKey(provider);
@@ -35,12 +35,16 @@ namespace RensaioBackend.Services.Jobs
             {
                 await _jobManagement.DisableRecurringJobAsync(JobType.GetChapters, provider.Id.ToString(), token)
                     .ConfigureAwait(false);
+                _logger.LogInformation("[job] SeriesProvider {Provider} ({SeriesId}) schedule: disabled.",
+                    provider.Provider, provider.SeriesId);
             }
             else
             {
-                await _jobManagement.ScheduleRecurringJobAsync(JobType.GetChapters, provider.Id, 
+                await _jobManagement.ScheduleRecurringJobAsync(JobType.GetChapters, provider.Id,
                     provider.Id.ToString(), groupKey, runNow, priority: Priority.Low, token: token)
                     .ConfigureAwait(false);
+                _logger.LogInformation("[job] SeriesProvider {Provider} ({SeriesId}) schedule: {Action}.",
+                    provider.Provider, provider.SeriesId, runNow ? "enabled+run-now" : "enabled");
             }
         }
 
@@ -48,6 +52,8 @@ namespace RensaioBackend.Services.Jobs
         {
             await _jobManagement.DeleteRecurringJobAsync(JobType.GetChapters, provider.Id.ToString(), token)
                 .ConfigureAwait(false);
+            _logger.LogInformation("[job] SeriesProvider {Provider} ({SeriesId}) recurring job deleted.",
+                provider.Provider, provider.SeriesId);
         }
 
         #endregion
@@ -63,12 +69,15 @@ namespace RensaioBackend.Services.Jobs
             {
                 await _jobManagement.DisableRecurringJobAsync(JobType.UpdateExtensions, groupKey, token)
                     .ConfigureAwait(false);
+                _logger.LogInformation("[job] Extension auto-update disabled.");
             }
             else
             {
-                await _jobManagement.ScheduleRecurringJobAsync(JobType.UpdateExtensions, groupKey, 
+                await _jobManagement.ScheduleRecurringJobAsync(JobType.UpdateExtensions, groupKey,
                     groupKey, groupKey, false, settings.ExtensionsCheckForUpdateSchedule, Priority.High, token)
                     .ConfigureAwait(false);
+                _logger.LogInformation("[job] Extension auto-update enabled (interval {Interval}).",
+                    settings.ExtensionsCheckForUpdateSchedule);
             }
         }
 
@@ -87,11 +96,15 @@ namespace RensaioBackend.Services.Jobs
                 await _jobManagement.ScheduleRecurringJobAsync(JobType.GetLatest, JsonSerializer.Serialize(mihonProviderId), mihonProviderId,
                     groupKey, runNow, priority: Priority.Low, token: token)
                     .ConfigureAwait(false);
+                _logger.LogInformation("[job] Source {Provider} ({Lang}) {Action}.",
+                    provider.Name, provider.Language, runNow ? "enabled+run-now" : "enabled");
             }
             else
             {
                 await _jobManagement.DisableRecurringJobAsync(JobType.GetLatest, mihonProviderId, token)
                     .ConfigureAwait(false);
+                _logger.LogInformation("[job] Source {Provider} ({Lang}) disabled.",
+                    provider.Name, provider.Language);
             }
         }
 

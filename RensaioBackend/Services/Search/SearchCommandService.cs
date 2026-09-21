@@ -140,6 +140,9 @@ namespace RensaioBackend.Services.Search
                     }
                 }).ConfigureAwait(false);
 
+                _logger.LogInformation("Augmented {ok}/{total} series ({errors} errors).",
+                    seriesDetailsMap.Count, linkedSeries.Count, sourceErrors.Count);
+
                 // Convert to ProviderSeriesDetails objects
                 var ProviderSeriesDetailsResults = new List<ProviderSeriesDetails>();
                 var categories = appSettings.Categories ?? [];

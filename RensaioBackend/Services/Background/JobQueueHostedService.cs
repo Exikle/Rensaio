@@ -203,8 +203,8 @@ namespace RensaioBackend.Services.Background
             
             try
             {
-                //_logger.LogInformation("Starting job {Key} in queue {queueName}", job.Key, queueName);
-                
+                _logger.LogDebug("Executing job {JobType} {Key} in queue {queueName}", job.JobType, job.Key, queueName);
+
                 JobInfo jobInfo = new JobInfo(job.Id, job.JobType, job.Key, job.GroupKey, job.JobParameters);
                 JobResult result = await jobExecution.ExecuteJobAsync(jobInfo, stoppingToken).ConfigureAwait(false);
                 
@@ -256,16 +256,14 @@ namespace RensaioBackend.Services.Background
                 {
                     updatedJob.Status = result == JobResult.Success ? QueueStatus.Completed : QueueStatus.Failed;
                     updatedJob.FinishedDate = DateTime.UtcNow;
-                    /*
                     if (result == JobResult.Success)
                     {
-                        _logger.LogInformation("Completed job {Key} in queue {queueName}", job.Key, queueName);
+                        _logger.LogDebug("Completed job {Key} in queue {queueName}", job.Key, queueName);
                     }
                     else
                     {
-                        _logger.LogWarning("Failed job {Key} in queue {queueName}", job.Key, queueName);
+                        _logger.LogDebug("Failed job {Key} in queue {queueName}", job.Key, queueName);
                     }
-                    */
                     await management.QueuedJobs.Where(j => j.Id == job.Id)
                         .ExecuteUpdateAsync(updates => updates.SetProperty(j => j.Status, updatedJob.Status)
                             .SetProperty(j => j.FinishedDate, updatedJob.FinishedDate), stoppingToken);

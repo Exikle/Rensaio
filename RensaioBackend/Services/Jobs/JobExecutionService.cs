@@ -26,7 +26,9 @@ namespace RensaioBackend.Services.Jobs
         public async Task<JobResult> ExecuteJobAsync(JobInfo jobInfo, CancellationToken token = default)
         {
             using var scope = _scopeFactory.CreateScope();
-            
+
+            _logger.LogDebug("Executing job {JobType} key {Key}", jobInfo.JobType, jobInfo.Key);
+
             try
             {
                 ICommand? command = GetCommandInstance(scope.ServiceProvider, jobInfo.JobType);

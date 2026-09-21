@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Pause, Play, CheckCircle2, Check, Trash2, FolderOpen, Copy, RefreshCw, FolderSync } from "lucide-react";
+import { Pause, Play, CheckCircle2, Check, Trash2, FolderOpen, Copy, RefreshCw, FolderSync, Pencil } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { SeriesStatus, type SeriesExtendedInfo } from "@/lib/api/types";
 import { formatThumbnailUrl } from "@/lib/utils/thumbnail";
@@ -131,6 +131,7 @@ export interface SeriesHeroProps {
   onVerify: () => void;
   onRefresh: () => void;
   onRename: () => void;
+  onEdit: () => void;
   onDelete: () => void;
 }
 
@@ -150,6 +151,7 @@ export function SeriesHero({
   onVerify,
   onRefresh,
   onRename,
+  onEdit,
   onDelete,
 }: SeriesHeroProps) {
   const [expanded, setExpanded] = useState(false);
@@ -206,8 +208,8 @@ export function SeriesHero({
           {/* Info column */}
           <div className="flex-1 min-w-0 space-y-3 sm:space-y-4">
 
-            {/* Status pill */}
-            <div>
+            {/* Status pill + Type chip */}
+            <div className="flex flex-wrap items-center gap-1.5">
               <span
                 className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[11px] font-medium uppercase tracking-wide border ${statusConfig.bg} ${statusConfig.border} ${statusConfig.text}`}
               >
@@ -217,6 +219,13 @@ export function SeriesHero({
                 />
                 {statusLabel}
               </span>
+              {series.type && (
+                <span
+                  className="inline-flex items-center rounded-full bg-foreground/[0.06] border border-border/40 px-2.5 py-0.5 text-[11px] font-medium uppercase tracking-wide text-foreground/80"
+                >
+                  {series.type}
+                </span>
+              )}
             </div>
 
             {/* Title */}
@@ -342,6 +351,18 @@ export function SeriesHero({
                 >
                   <FolderSync className={`h-4 w-4 sm:mr-2 ${renamePending ? 'animate-spin' : ''}`} />
                   <span className="hidden sm:inline">Rename</span>
+                </Button>
+              )}
+
+              {canEditSeries && (
+                <Button
+                  variant="outline"
+                  onClick={onEdit}
+                  title="Edit series title, type, or storage path"
+                  className="px-0 w-9 sm:w-auto sm:px-4"
+                >
+                  <Pencil className="h-4 w-4 sm:mr-2" />
+                  <span className="hidden sm:inline">Edit</span>
                 </Button>
               )}
 
