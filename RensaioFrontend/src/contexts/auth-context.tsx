@@ -3,7 +3,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { userService } from '@/lib/api/services/userService';
-import { type User, type AuthStatus, UserLevel } from '@/lib/api/types';
+import { type User, type AuthStatus, type OidcStatus, UserLevel } from '@/lib/api/types';
 
 // Cookie helpers for user session persistence (works across tabs/windows)
 function setSessionCookie(username: string): void {
@@ -26,12 +26,14 @@ interface AuthContextType {
   isAuthenticated: boolean;
   isLoading: boolean;
   isAuthEnabled: boolean;
+  oidc: OidcStatus | null;
   availableUsers: AuthStatus['users'];
   userLevel: UserLevel;
   canManage: boolean;      // Manager+ (can manage series, providers, sources)
   canAdmin: boolean;       // Admin/Owner (can manage users, settings, delete, clear alerts)
   canOwner: boolean;       // Owner only (can edit settings, manage other admins)
   login: (username: string, password: string, rememberMe?: boolean) => Promise<void>;
+  completeSsoLogin: (code: string, returnTo?: string) => Promise<void>;
   selectUser: (username: string) => Promise<void>;
   logout: () => Promise<void>;
   changePassword: (currentPassword: string, newPassword: string) => Promise<void>;
@@ -47,6 +49,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [token, setToken] = useState<string | null>(null);
   const [selectedUsername, setSelectedUsername] = useState<string | null>(null);
   const [isAuthEnabled, setIsAuthEnabled] = useState(false);
+  const [oidc, setOidc] = useState<OidcStatus | null>(null);
   const [availableUsers, setAvailableUsers] = useState<AuthStatus['users']>([]);
   const [isLoading, setIsLoading] = useState(true);
 
@@ -55,6 +58,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     try {
       const status = await userService.getAuthStatus();
       setIsAuthEnabled(status.authenticationEnabled);
+      setOidc(status.oidc ?? null);
       setAvailableUsers(status.users ?? []);
 
       if (status.authenticationEnabled) {
@@ -184,6 +188,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     router.push('/library');
   }, [router]);
 
+  // Finish an OIDC login: the backend callback redirected here with a one-time code
+  const completeSsoLogin = useCallback(async (code: string, returnTo = '/library') => {
+    const result = await userService.exchangeOidcCode(code);
+    localStorage.removeItem('rensaio_selected_user');
+    setSelectedUsername(null);
+    setToken(result.token);
+    sessionStorage.setItem('rensaio_token', result.token);
+    setUser(result.user);
+    setSessionCookie(result.user.username);
+    router.push(returnTo.startsWith('/') ? returnTo : '/library');
+  }, [router]);
+
   const selectUser = useCallback(async (username: string) => {
     const result = await userService.selectUser(username);
     localStorage.setItem('rensaio_selected_user', username);
@@ -231,12 +247,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         isAuthenticated: !!user,
         isLoading,
         isAuthEnabled,
+        oidc,
         availableUsers,
         userLevel,
         canManage,
         canAdmin,
         canOwner,
         login,
+        completeSsoLogin,
         selectUser,
         logout,
         changePassword,

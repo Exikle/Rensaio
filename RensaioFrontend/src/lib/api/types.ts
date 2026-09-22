@@ -54,6 +54,14 @@ export interface Settings {
   // Security settings
   authenticationEnabled: boolean;
   externalDomain: string;
+  // Single sign-on (OpenID Connect). Advanced options live in appsettings.json.
+  oidcEnabled: boolean;
+  oidcIssuer: string;
+  oidcClientId: string;
+  oidcClientSecret: string;
+  oidcButtonLabel: string;
+  /** Server-computed: true when config/env supplies the OIDC basics, making the fields read-only. */
+  oidcManagedByConfig?: boolean;
   // Contribution settings
   contributionEnabled: boolean;
   contributionServerUrl: string;
@@ -715,6 +723,7 @@ export interface User {
   lastLoginAt?: string;
   isActive: boolean;
   hasPassword: boolean;
+  hasExternalLogin?: boolean;
 }
 
 export enum UserLevel {
@@ -737,10 +746,18 @@ export interface UpdateUserRequest {
   isActive?: boolean;
 }
 
+export interface OidcStatus {
+  enabled: boolean;
+  buttonLabel: string;
+  autoRedirect: boolean;
+  hidePasswordLogin: boolean;
+}
+
 export interface AuthStatus {
   authenticationEnabled: boolean;
   hasUsers: boolean;
   users?: User[];
+  oidc?: OidcStatus;
 }
 
 export interface LoginRequest {
