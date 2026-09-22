@@ -518,6 +518,20 @@ namespace RensaioBackend.Services.Settings
             await UpsertSettingAsync(name, value, token).ConfigureAwait(false);
         }
 
+        /// <summary>
+        /// Settings as they may be shown to clients: a copy of the effective settings with
+        /// the OIDC client secret blanked. Every read path that leaves the process
+        /// (REST GET, MCP get_settings) goes through here.
+        /// </summary>
+        public async ValueTask<SettingsDto> GetSettingsForClientAsync(CancellationToken token = default)
+        {
+            var settings = await GetSettingsAsync(token).ConfigureAwait(false);
+            var view = GetFromEditableSettings(settings);
+            view.OidcClientSecretSet = !string.IsNullOrEmpty(view.OidcClientSecret);
+            view.OidcClientSecret = string.Empty;
+            return view;
+        }
+
         public SettingsDto GetFromEditableSettings(EditableSettingsDto ed)
         {
             SettingsDto set = new SettingsDto
@@ -584,6 +598,7 @@ namespace RensaioBackend.Services.Settings
                 set.OidcClientId = effective.ClientId;
                 set.OidcClientSecret = effective.ClientSecret;
                 set.OidcButtonLabel = effective.ButtonLabel;
+                set.OidcConfigError = effective.BindError;
             }
             return set;
         }

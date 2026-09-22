@@ -1233,6 +1233,12 @@ function SecuritySection({
             cannot be changed here.
           </p>
         )}
+        {localSettings.oidcConfigError && (
+          <p className="text-xs text-red-600 dark:text-red-400">
+            The Oidc configuration could not be read, so single sign-on is off:{" "}
+            {localSettings.oidcConfigError}
+          </p>
+        )}
         <div className="space-y-2">
           <Label htmlFor="oidc-issuer">Issuer URL</Label>
           <Input

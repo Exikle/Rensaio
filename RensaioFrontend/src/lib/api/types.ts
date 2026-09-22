@@ -66,6 +66,8 @@ export interface Settings {
   oidcClientSecretSet?: boolean;
   /** Input-only: send true to remove the stored secret (switch to a public client). */
   oidcClearClientSecret?: boolean;
+  /** Server-computed: the Oidc config section could not be read; SSO is off until fixed. */
+  oidcConfigError?: string | null;
   // Contribution settings
   contributionEnabled: boolean;
   contributionServerUrl: string;

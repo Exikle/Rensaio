@@ -37,4 +37,12 @@ public class SettingsDto : EditableSettingsDto
     [JsonPropertyName("oidcClearClientSecret")]
     public bool OidcClearClientSecret { get; set; }
 
+    /// <summary>
+    /// Set when the "Oidc" configuration section could not be read (e.g. a malformed
+    /// boolean in an environment variable); SSO is disabled until it is fixed.
+    /// Server-computed, never persisted.
+    /// </summary>
+    [JsonPropertyName("oidcConfigError")]
+    public string? OidcConfigError { get; set; }
+
 }
