@@ -126,7 +126,13 @@ namespace RensaioBackend.Services.Series
             }
 
             if (!string.IsNullOrEmpty(keyword))
-                series = series.Where(a => EF.Functions.Like(a.Title, $"%{keyword}%"));
+            {
+                // SQLite's LIKE ignores ASCII case; PostgreSQL's does not. ILIKE keeps the
+                // search box behaving the same on both.
+                series = _db.Database.IsNpgsql()
+                    ? series.Where(a => EF.Functions.ILike(a.Title, $"%{keyword}%"))
+                    : series.Where(a => EF.Functions.Like(a.Title, $"%{keyword}%"));
+            }
 
             series = series.OrderByDescending(a => a.FetchDate);
 
