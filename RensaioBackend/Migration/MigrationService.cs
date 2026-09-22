@@ -61,7 +61,7 @@ public class MigrationService
     /// <c>__EFMigrationsHistory</c> table and inserts records for all known migrations so that
     /// <c>MigrateAsync</c> won't attempt to re-apply them on top of an already-complete schema.
     /// </summary>
-    private static async Task MarkAllMigrationsAsAppliedAsync(AppDbContext db, CancellationToken cancellationToken)
+    internal static async Task MarkAllMigrationsAsAppliedAsync(AppDbContext db, CancellationToken cancellationToken)
     {
         await db.Database.ExecuteSqlRawAsync(
             "CREATE TABLE IF NOT EXISTS \"__EFMigrationsHistory\" (\"MigrationId\" TEXT NOT NULL PRIMARY KEY, \"ProductVersion\" TEXT NOT NULL);",
@@ -136,6 +136,13 @@ public class MigrationService
             return false;
         }
         string newDatabasePath = databaseConfig.SqlitePath!;
+
+        string migratedMarker = newDatabasePath + MigrateDbCommand.MarkerSuffix;
+        if (File.Exists(migratedMarker))
+        {
+            _logger.LogWarning("This SQLite database was copied to PostgreSQL ({Marker}) but Rensaio is running on SQLite. " +
+                "Set Database:Provider=postgres to use the copy, or delete the marker file to keep using SQLite.", migratedMarker);
+        }
 
         // A zero-byte file is not a database. Any component that opens a connection before
         // this service runs (e.g. a hosted service querying Settings) makes SQLite create an

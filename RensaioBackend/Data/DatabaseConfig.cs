@@ -71,6 +71,14 @@ namespace RensaioBackend.Data
         }
 
         public static DatabaseConfig Resolve(IConfiguration configuration)
+            => Resolve(configuration, null);
+
+        /// <summary>
+        /// Resolves for a specific provider regardless of <c>Database:Provider</c>. Used by
+        /// the copy command, which needs both the SQLite and the PostgreSQL side of the
+        /// same configuration.
+        /// </summary>
+        public static DatabaseConfig Resolve(IConfiguration configuration, DatabaseProvider? forceProvider)
         {
             ArgumentNullException.ThrowIfNull(configuration);
 
@@ -78,7 +86,8 @@ namespace RensaioBackend.Data
             var section = configuration.GetSection("Database");
             string? host = section["Host"];
 
-            DatabaseProvider provider = ParseProvider(section["Provider"])
+            DatabaseProvider provider = forceProvider
+                ?? ParseProvider(section["Provider"])
                 ?? (!string.IsNullOrWhiteSpace(host) || LooksLikePostgres(connectionString)
                     ? DatabaseProvider.Postgres
                     : DatabaseProvider.Sqlite);
@@ -86,8 +95,12 @@ namespace RensaioBackend.Data
             if (provider == DatabaseProvider.Sqlite)
             {
                 if (LooksLikePostgres(connectionString))
-                    throw new InvalidOperationException(
-                        $"{ProviderKey} is 'sqlite' but ConnectionStrings:{ConnectionName} is a PostgreSQL connection string.");
+                {
+                    if (forceProvider is null)
+                        throw new InvalidOperationException(
+                            $"{ProviderKey} is 'sqlite' but ConnectionStrings:{ConnectionName} is a PostgreSQL connection string.");
+                    connectionString = null; // forced SQLite side: fall back to the default file
+                }
                 return new DatabaseConfig(provider, ResolveSqlitePath(connectionString), null);
             }
 
