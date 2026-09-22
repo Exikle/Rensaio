@@ -29,7 +29,7 @@ function buildSsoUrl(rememberMe: boolean): string {
 
 function LoginForm() {
   const searchParams = useSearchParams();
-  const { login, completeSsoLogin, isAuthEnabled, oidc } = useAuth();
+  const { login, completeSsoLogin, isAuthEnabled, isLoading: authLoading, oidc } = useAuth();
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [rememberMe, setRememberMe] = useState(false);
@@ -58,9 +58,11 @@ function LoginForm() {
     }
   }, [ssoError]);
 
-  // Finish an OIDC login: exchange the one-time code for a session
+  // Finish an OIDC login: exchange the one-time code for a session.
+  // Wait for the provider's own startup check to finish first, otherwise its failed
+  // refresh-token attempt lands after our exchange and clears the user again.
   useEffect(() => {
-    if (!ssoCode || ssoHandled.current) return;
+    if (!ssoCode || ssoHandled.current || authLoading) return;
     ssoHandled.current = true;
     setLoading(true);
     const returnTo = searchParams.get('returnTo') || '/library';
@@ -70,14 +72,21 @@ function LoginForm() {
       // Drop the spent code from the URL so a refresh shows the form, not the same error
       window.history.replaceState(null, '', '/login');
     });
-  }, [ssoCode, searchParams, completeSsoLogin]);
+  }, [ssoCode, searchParams, completeSsoLogin, authLoading]);
 
-  // Auto-redirect: go straight to the provider unless we are already mid-flow or showing an error
+  // Auto-redirect: go straight to the provider unless we are mid-flow, showing an error,
+  // or the user just logged out (they get the page with the button instead).
   useEffect(() => {
-    if (oidc?.enabled && oidc.autoRedirect && !ssoCode && !ssoError) {
+    if (authLoading || !oidc?.enabled || !oidc.autoRedirect || ssoCode || ssoError) return;
+    let justLoggedOut = false;
+    try {
+      justLoggedOut = sessionStorage.getItem('rensaio_logged_out') === '1';
+      sessionStorage.removeItem('rensaio_logged_out');
+    } catch { /* storage unavailable */ }
+    if (!justLoggedOut) {
       window.location.href = buildSsoUrl(true);
     }
-  }, [oidc, ssoCode, ssoError]);
+  }, [authLoading, oidc, ssoCode, ssoError]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();

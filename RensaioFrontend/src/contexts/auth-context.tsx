@@ -197,7 +197,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     sessionStorage.setItem('rensaio_token', result.token);
     setUser(result.user);
     setSessionCookie(result.user.username);
-    router.push(returnTo.startsWith('/') ? returnTo : '/library');
+    // Same-origin paths only: '//host' and '/\host' would be cross-origin navigations
+    const safeReturnTo = returnTo.startsWith('/') && !returnTo.startsWith('//') && !returnTo.startsWith('/\\')
+      ? returnTo
+      : '/library';
+    router.push(safeReturnTo);
   }, [router]);
 
   const selectUser = useCallback(async (username: string) => {
@@ -218,6 +222,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     clearSessionCookie();
     setSelectedUsername(null);
     setUser(null);
+    // Tell the login page this visit follows a logout so SSO auto-redirect does not
+    // bounce straight back to the provider and silently sign the user in again.
+    try { sessionStorage.setItem('rensaio_logged_out', '1'); } catch { /* storage unavailable */ }
     router.push(isAuthEnabled ? '/login' : '/user-select');
   }, [router, isAuthEnabled]);
 
