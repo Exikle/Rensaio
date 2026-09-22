@@ -141,6 +141,17 @@ public class MigrationService
         }
         newDatabasePath = newDatabasePath.Substring("Data Source=".Length).Trim();
         newDatabasePath = Path.GetFullPath(newDatabasePath);
+
+        // A zero-byte file is not a database. Any component that opens a connection before
+        // this service runs (e.g. a hosted service querying Settings) makes SQLite create an
+        // empty file, which would otherwise be mistaken for a Kaizoku v1 database below,
+        // moved aside as "_1.0_backup", and leave a fresh install unable to start.
+        if (File.Exists(newDatabasePath) && new FileInfo(newDatabasePath).Length == 0)
+        {
+            _logger.LogInformation("Empty database file found at {Path}; treating as a new installation.", newDatabasePath);
+            File.Delete(newDatabasePath);
+        }
+
         if (!File.Exists(newDatabasePath))
         {
             _logger.LogInformation("No existing database found at {Path}. Assuming new installation.", newDatabasePath);
