@@ -3,6 +3,7 @@ using RensaioBackend.Models.Database;
 using RensaioBackend.Models.Enums;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Design;
+using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Mihon.ExtensionsBridge.Models.Extensions;
 using System.Text.Json.Serialization;
 using Chapter = RensaioBackend.Models.Chapter;
@@ -76,7 +77,7 @@ namespace RensaioBackend.Data
                 entity.Property(m => m.UserUid).IsRequired(false);
                 entity.Property(m => m.UserRole).IsRequired().HasConversion<int>();
                 entity.Property(m => m.UpdateDate).IsRequired();
-                entity.Property(m => m.MappingStatus).HasColumnType("INTEGER").IsRequired();
+                entity.Property(m => m.MappingStatus).IsRequired();
                 entity.Property(m => m.LinkedDate).IsRequired(false);
                 // LinkedSitesIds: comma-separated "site:id" strings in a TEXT column
                 entity.Property(m => m.LinkedSitesIds).HasStringSplit();
@@ -314,6 +315,40 @@ namespace RensaioBackend.Data
                 entity.HasIndex(c => new { c.UserId, c.Provider }).IsUnique().HasDatabaseName("IX_UserScrobblerConfig_UserId_Provider");
             });
 
+            ApplyProviderConventions(modelBuilder);
         }
+
+        /// <summary>
+        /// The entity configuration above is written for SQLite. This is the single place
+        /// where the model is adjusted for any other provider, so the per-property
+        /// configuration never has to branch.
+        /// </summary>
+        private void ApplyProviderConventions(ModelBuilder modelBuilder)
+        {
+            if (Database.IsSqlite())
+                return;
+
+            foreach (var entityType in modelBuilder.Model.GetEntityTypes())
+            {
+                foreach (var property in entityType.GetProperties())
+                {
+                    // "BINARY" is SQLite's byte-order collation and is that provider's default
+                    // anyway; other providers have no collation by that name and are already
+                    // case-sensitive and byte-ordered without it.
+                    if (string.Equals(property.GetCollation(), "BINARY", StringComparison.Ordinal))
+                        property.SetCollation(null);
+
+                    // SQLite stores DateTime as text with no time-zone information, so values
+                    // read back are DateTimeKind.Unspecified. Providers with a real timestamp
+                    // type need every value to be UTC, both written and read.
+                    if (property.ClrType == typeof(DateTime) || property.ClrType == typeof(DateTime?))
+                        property.SetValueConverter(UtcDateTimeConverter);
+                }
+            }
+        }
+
+        private static readonly ValueConverter<DateTime, DateTime> UtcDateTimeConverter = new(
+            v => v.Kind == DateTimeKind.Utc ? v : (v.Kind == DateTimeKind.Local ? v.ToUniversalTime() : DateTime.SpecifyKind(v, DateTimeKind.Utc)),
+            v => DateTime.SpecifyKind(v, DateTimeKind.Utc));
     }
 }
