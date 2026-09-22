@@ -378,6 +378,11 @@ namespace RensaioBackend.Services.Settings
                 ProviderErrorRedHours = settings.ProviderErrorRedHours,
                 AuthenticationEnabled = settings.AuthenticationEnabled,
                 ExternalDomain = settings.ExternalDomain,
+                OidcEnabled = settings.OidcEnabled,
+                OidcIssuer = settings.OidcIssuer,
+                OidcClientId = settings.OidcClientId,
+                OidcClientSecret = settings.OidcClientSecret,
+                OidcButtonLabel = settings.OidcButtonLabel,
                 ContributionEnabled = settings.ContributionEnabled,
                 ContributionServerUrl = settings.ContributionServerUrl,
                 ContributionContributorId = settings.ContributionContributorId,
@@ -515,6 +520,11 @@ namespace RensaioBackend.Services.Settings
                 ProviderErrorRedHours = ed.ProviderErrorRedHours,
                 AuthenticationEnabled = ed.AuthenticationEnabled,
                 ExternalDomain = ed.ExternalDomain,
+                OidcEnabled = ed.OidcEnabled,
+                OidcIssuer = ed.OidcIssuer,
+                OidcClientId = ed.OidcClientId,
+                OidcClientSecret = ed.OidcClientSecret,
+                OidcButtonLabel = ed.OidcButtonLabel,
                 ContributionEnabled = ed.ContributionEnabled,
                 ContributionServerUrl = ed.ContributionServerUrl,
                 ContributionContributorId = ed.ContributionContributorId,
@@ -522,6 +532,7 @@ namespace RensaioBackend.Services.Settings
                 ContributionVerified = ed.ContributionVerified,
             };
             set.StorageFolder = _config["StorageFolder"] ?? string.Empty;
+            set.OidcManagedByConfig = Auth.Oidc.OidcOptions.IsManagedByConfig(_config);
             return set;
         }
         /// <summary>

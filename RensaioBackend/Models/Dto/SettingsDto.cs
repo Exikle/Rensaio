@@ -14,4 +14,13 @@ public class SettingsDto : EditableSettingsDto
         set => _storageFolder = value;
     }
 
+    /// <summary>
+    /// True when any of the basic OIDC values (enabled, issuer, client id, secret)
+    /// is supplied via appsettings.json or environment variables. The UI shows the
+    /// fields read-only in that case, since config overrides what is stored here.
+    /// Server-computed, never persisted.
+    /// </summary>
+    [JsonPropertyName("oidcManagedByConfig")]
+    public bool OidcManagedByConfig { get; set; }
+
 }

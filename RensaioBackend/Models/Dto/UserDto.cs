@@ -36,6 +36,10 @@ public class UserDto
     [JsonPropertyName("hasPassword")]
     public bool HasPassword { get; set; }
 
+    /// <summary>True when the user has signed in through single sign-on at least once.</summary>
+    [JsonPropertyName("hasExternalLogin")]
+    public bool HasExternalLogin { get; set; }
+
     public static UserDto FromEntity(UserEntity entity)
     {
         return new UserDto
@@ -91,6 +95,31 @@ public class AuthStatusDto
 
     [JsonPropertyName("users")]
     public List<UserDto>? Users { get; set; }
+
+    [JsonPropertyName("oidc")]
+    public OidcStatusDto? Oidc { get; set; }
+}
+
+/// <summary>What the login page needs to know about single sign-on. Never includes secrets.</summary>
+public class OidcStatusDto
+{
+    [JsonPropertyName("enabled")]
+    public bool Enabled { get; set; }
+
+    [JsonPropertyName("buttonLabel")]
+    public string ButtonLabel { get; set; } = "Single Sign-On";
+
+    [JsonPropertyName("autoRedirect")]
+    public bool AutoRedirect { get; set; }
+
+    [JsonPropertyName("hidePasswordLogin")]
+    public bool HidePasswordLogin { get; set; }
+}
+
+public class OidcExchangeRequestDto
+{
+    [JsonPropertyName("code")]
+    public string Code { get; set; } = string.Empty;
 }
 
 public class LoginRequestDto
