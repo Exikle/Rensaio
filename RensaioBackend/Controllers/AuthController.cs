@@ -3,6 +3,7 @@ using RensaioBackend.Models.Database;
 using RensaioBackend.Models.Dto;
 using RensaioBackend.Models.Enums;
 using RensaioBackend.Services.Auth;
+using RensaioBackend.Services.Auth.Oidc;
 using RensaioBackend.Services.Users;
 using RensaioBackend.Services.Settings;
 using Microsoft.AspNetCore.Mvc;
@@ -20,6 +21,7 @@ public class AuthController : ControllerBase
     private readonly UserQueryService _userQueryService;
     private readonly UserCommandService _userCommandService;
     private readonly SettingsService _settingsService;
+    private readonly OidcService _oidcService;
 
     public AuthController(
         AppDbContext db,
@@ -28,7 +30,8 @@ public class AuthController : ControllerBase
         UserInviteService userInviteService,
         UserQueryService userQueryService,
         UserCommandService userCommandService,
-        SettingsService settingsService)
+        SettingsService settingsService,
+        OidcService oidcService)
     {
         _db = db;
         _passwordService = passwordService;
@@ -37,6 +40,7 @@ public class AuthController : ControllerBase
         _userQueryService = userQueryService;
         _userCommandService = userCommandService;
         _settingsService = settingsService;
+        _oidcService = oidcService;
     }
 
     /// <summary>
@@ -55,6 +59,18 @@ public class AuthController : ControllerBase
             AuthenticationEnabled = authEnabled,
             HasUsers = hasUsers
         };
+
+        if (authEnabled)
+        {
+            OidcOptions oidc = await _oidcService.GetOptionsAsync(token);
+            result.Oidc = new OidcStatusDto
+            {
+                Enabled = oidc.IsConfigured,
+                ButtonLabel = oidc.ButtonLabel,
+                AutoRedirect = oidc.IsConfigured && oidc.AutoRedirect,
+                HidePasswordLogin = oidc.IsConfigured && oidc.HidePasswordLogin,
+            };
+        }
 
         // When auth is disabled, return user list for the user selector
         if (!authEnabled && hasUsers)

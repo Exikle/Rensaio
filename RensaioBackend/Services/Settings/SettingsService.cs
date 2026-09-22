@@ -236,8 +236,9 @@ namespace RensaioBackend.Services.Settings
             }
         }
 
-        public async Task SaveSettingsAsync(EditableSettingsDto set, bool force = false, CancellationToken token = default)
+        public async Task SaveSettingsAsync(EditableSettingsDto set, bool force = false, CancellationToken token = default, bool clearOidcClientSecret = false)
         {
+            await PreserveStoredOidcValuesAsync(set, clearOidcClientSecret, token).ConfigureAwait(false);
             if (set.NumberOfSimultaneousDownloads != _settings?.NumberOfSimultaneousDownloads ||
                 set.ChapterDownloadFailRetries != _settings?.ChapterDownloadFailRetries ||
                 set.ChapterDownloadFailRetryTime != _settings?.ChapterDownloadFailRetryTime || 
@@ -378,6 +379,11 @@ namespace RensaioBackend.Services.Settings
                 ProviderErrorRedHours = settings.ProviderErrorRedHours,
                 AuthenticationEnabled = settings.AuthenticationEnabled,
                 ExternalDomain = settings.ExternalDomain,
+                OidcEnabled = settings.OidcEnabled,
+                OidcIssuer = settings.OidcIssuer,
+                OidcClientId = settings.OidcClientId,
+                OidcClientSecret = settings.OidcClientSecret,
+                OidcButtonLabel = settings.OidcButtonLabel,
                 ContributionEnabled = settings.ContributionEnabled,
                 ContributionServerUrl = settings.ContributionServerUrl,
                 ContributionContributorId = settings.ContributionContributorId,
@@ -388,7 +394,47 @@ namespace RensaioBackend.Services.Settings
                 ContributionVerified = _settings?.ContributionVerified ?? false,
             };
 
-            await SaveSettingsAsync(editableSettings, force, token).ConfigureAwait(false);
+            await SaveSettingsAsync(editableSettings, force, token, clearOidcClientSecret: settings.OidcClearClientSecret).ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// Protects the stored OIDC values on every save path (REST and MCP):
+        /// - when config/env supplies them, the caller only ever saw effective values,
+        ///   so keep what is stored and never write an environment secret to the DB;
+        /// - otherwise an empty client secret means "keep the current one", because
+        ///   GET never returns the secret to clients; <paramref name="clearClientSecret"/>
+        ///   is the explicit way to remove it (switch to a public client).
+        /// </summary>
+        private async Task PreserveStoredOidcValuesAsync(EditableSettingsDto set, bool clearClientSecret, CancellationToken token)
+        {
+            string[] names =
+            [
+                nameof(EditableSettingsDto.OidcEnabled),
+                nameof(EditableSettingsDto.OidcIssuer),
+                nameof(EditableSettingsDto.OidcClientId),
+                nameof(EditableSettingsDto.OidcClientSecret),
+                nameof(EditableSettingsDto.OidcButtonLabel),
+            ];
+            var stored = await _db.Settings.AsNoTracking()
+                .Where(s => names.Contains(s.Name))
+                .ToDictionaryAsync(s => s.Name, s => s.Value, token).ConfigureAwait(false);
+
+            if (Auth.Oidc.OidcOptions.IsManagedByConfig(_config))
+            {
+                set.OidcEnabled = stored.TryGetValue(nameof(EditableSettingsDto.OidcEnabled), out var e) && bool.TryParse(e, out var eb) && eb;
+                set.OidcIssuer = stored.GetValueOrDefault(nameof(EditableSettingsDto.OidcIssuer)) ?? string.Empty;
+                set.OidcClientId = stored.GetValueOrDefault(nameof(EditableSettingsDto.OidcClientId)) ?? string.Empty;
+                set.OidcClientSecret = stored.GetValueOrDefault(nameof(EditableSettingsDto.OidcClientSecret)) ?? string.Empty;
+                set.OidcButtonLabel = stored.GetValueOrDefault(nameof(EditableSettingsDto.OidcButtonLabel)) ?? "Single Sign-On";
+            }
+            else if (clearClientSecret)
+            {
+                set.OidcClientSecret = string.Empty;
+            }
+            else if (string.IsNullOrEmpty(set.OidcClientSecret))
+            {
+                set.OidcClientSecret = stored.GetValueOrDefault(nameof(EditableSettingsDto.OidcClientSecret)) ?? string.Empty;
+            }
         }
 
         /// <summary>
@@ -472,6 +518,20 @@ namespace RensaioBackend.Services.Settings
             await UpsertSettingAsync(name, value, token).ConfigureAwait(false);
         }
 
+        /// <summary>
+        /// Settings as they may be shown to clients: a copy of the effective settings with
+        /// the OIDC client secret blanked. Every read path that leaves the process
+        /// (REST GET, MCP get_settings) goes through here.
+        /// </summary>
+        public async ValueTask<SettingsDto> GetSettingsForClientAsync(CancellationToken token = default)
+        {
+            var settings = await GetSettingsAsync(token).ConfigureAwait(false);
+            var view = GetFromEditableSettings(settings);
+            view.OidcClientSecretSet = !string.IsNullOrEmpty(view.OidcClientSecret);
+            view.OidcClientSecret = string.Empty;
+            return view;
+        }
+
         public SettingsDto GetFromEditableSettings(EditableSettingsDto ed)
         {
             SettingsDto set = new SettingsDto
@@ -515,6 +575,11 @@ namespace RensaioBackend.Services.Settings
                 ProviderErrorRedHours = ed.ProviderErrorRedHours,
                 AuthenticationEnabled = ed.AuthenticationEnabled,
                 ExternalDomain = ed.ExternalDomain,
+                OidcEnabled = ed.OidcEnabled,
+                OidcIssuer = ed.OidcIssuer,
+                OidcClientId = ed.OidcClientId,
+                OidcClientSecret = ed.OidcClientSecret,
+                OidcButtonLabel = ed.OidcButtonLabel,
                 ContributionEnabled = ed.ContributionEnabled,
                 ContributionServerUrl = ed.ContributionServerUrl,
                 ContributionContributorId = ed.ContributionContributorId,
@@ -522,6 +587,19 @@ namespace RensaioBackend.Services.Settings
                 ContributionVerified = ed.ContributionVerified,
             };
             set.StorageFolder = _config["StorageFolder"] ?? string.Empty;
+            set.OidcManagedByConfig = Auth.Oidc.OidcOptions.IsManagedByConfig(_config);
+            if (set.OidcManagedByConfig)
+            {
+                // Show the effective values so the (read-only) Settings fields reflect
+                // reality. SaveSettingsAsync(SettingsDto) keeps them out of the database.
+                var effective = Auth.Oidc.OidcOptions.Resolve(_config, ed);
+                set.OidcEnabled = effective.Enabled;
+                set.OidcIssuer = effective.Issuer;
+                set.OidcClientId = effective.ClientId;
+                set.OidcClientSecret = effective.ClientSecret;
+                set.OidcButtonLabel = effective.ButtonLabel;
+                set.OidcConfigError = effective.BindError;
+            }
             return set;
         }
         /// <summary>
