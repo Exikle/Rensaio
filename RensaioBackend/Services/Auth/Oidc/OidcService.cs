@@ -74,7 +74,25 @@ public class OidcService
     public async Task<OidcOptions> GetOptionsAsync(CancellationToken token = default)
     {
         var settings = await _settingsService.GetSettingsAsync(token).ConfigureAwait(false);
-        return OidcOptions.Resolve(_configuration, settings);
+        var options = OidcOptions.Resolve(_configuration, settings);
+        if (options.BindError != null)
+            _logger.LogWarning("The 'Oidc' configuration section could not be read and was ignored: {Error}", options.BindError);
+        return options;
+    }
+
+    /// <summary>
+    /// Fetches the discovery document and checks it really belongs to the configured issuer
+    /// (OpenID Connect Discovery §4.3), so a misconfigured or hijacked URL cannot mint tokens for us.
+    /// </summary>
+    private async Task<OpenIdConnectConfiguration> GetDiscoveryAsync(OidcOptions options, CancellationToken token)
+    {
+        var discovery = await _discovery.GetAsync(options.Issuer, token).ConfigureAwait(false);
+        if (!string.Equals(discovery.Issuer?.TrimEnd('/'), options.Issuer, StringComparison.Ordinal))
+        {
+            _logger.LogWarning("OIDC discovery issuer '{Actual}' does not match configured issuer '{Expected}'", discovery.Issuer, options.Issuer);
+            throw new OidcLoginException("provider", "The provider's issuer does not match the configured Issuer URL.");
+        }
+        return discovery;
     }
 
     /// <summary>
@@ -105,7 +123,7 @@ public class OidcService
     public async Task<(string Url, string State)> BuildAuthorizationUrlAsync(
         OidcOptions options, string redirectUri, bool rememberMe, string returnTo, CancellationToken token)
     {
-        var discovery = await _discovery.GetAsync(options.Issuer, token).ConfigureAwait(false);
+        var discovery = await GetDiscoveryAsync(options, token).ConfigureAwait(false);
         if (string.IsNullOrWhiteSpace(discovery.AuthorizationEndpoint))
             throw new OidcLoginException("provider", "Provider discovery document has no authorization_endpoint.");
 
@@ -148,7 +166,7 @@ public class OidcService
             throw new OidcLoginException("state", "Login request expired or was not started here.");
         _cache.Remove(StateCachePrefix + state);
 
-        var discovery = await _discovery.GetAsync(options.Issuer, token).ConfigureAwait(false);
+        var discovery = await GetDiscoveryAsync(options, token).ConfigureAwait(false);
         var (idToken, accessToken) = await ExchangeCodeAsync(options, discovery, code, pending, token).ConfigureAwait(false);
         ClaimsPrincipal principal = ValidateIdToken(options, discovery, idToken, pending.Nonce);
 
@@ -235,11 +253,22 @@ public class OidcService
             ["client_id"] = options.ClientId,
             ["code_verifier"] = pending.CodeVerifier,
         };
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, discovery.TokenEndpoint)
+        {
+            Content = new FormUrlEncodedContent(form)
+        };
         if (!string.IsNullOrWhiteSpace(options.ClientSecret))
-            form["client_secret"] = options.ClientSecret;
+        {
+            // client_secret_basic is the OIDC default and the one every provider must accept
+            // (RFC 6749 §2.3.1: credentials are form-urlencoded before base64).
+            string credentials = Uri.EscapeDataString(options.ClientId) + ":" + Uri.EscapeDataString(options.ClientSecret);
+            request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue(
+                "Basic", Convert.ToBase64String(Encoding.UTF8.GetBytes(credentials)));
+        }
 
         var http = _httpClientFactory.CreateClient(HttpClientName);
-        using var response = await http.PostAsync(discovery.TokenEndpoint, new FormUrlEncodedContent(form), token).ConfigureAwait(false);
+        using var response = await http.SendAsync(request, token).ConfigureAwait(false);
         string body = await response.Content.ReadAsStringAsync(token).ConfigureAwait(false);
         if (!response.IsSuccessStatusCode)
         {
@@ -303,7 +332,10 @@ public class OidcService
 
     private async Task<UserEntity> ResolveUserAsync(OidcOptions options, string issuer, string subject, ClaimsPrincipal principal, CancellationToken token)
     {
-        string? username = FirstNonEmpty(principal, options.UsernameClaim, "preferred_username", "name", "email");
+        // Only the configured claim identifies the user. No fallback to 'name' or 'email':
+        // those are often user-editable at the provider and would allow picking a victim account.
+        string? username = principal.FindFirst(options.UsernameClaim)?.Value?.Trim();
+        bool hasGroupsClaim = principal.HasClaim(c => c.Type == options.GroupsClaim);
         List<string> groups = principal.FindAll(options.GroupsClaim).Select(c => c.Value).ToList();
 
         UserExternalLoginEntity? link = await _db.UserExternalLogins
@@ -317,18 +349,20 @@ public class OidcService
         if (user == null)
         {
             if (string.IsNullOrWhiteSpace(username))
-                throw new OidcLoginException("claims", $"ID token has no '{options.UsernameClaim}' claim to identify the user.");
+                throw new OidcLoginException("claims", $"The identity provider returned no '{options.UsernameClaim}' claim to identify the user.");
 
-            // Link to an existing user with the same name (case-insensitive) on first login.
-            string lowered = username.ToLowerInvariant();
-            user = await _db.Users.FirstOrDefaultAsync(u => u.Username.ToLower() == lowered, token).ConfigureAwait(false);
+            user = await FindUserByNameAsync(username, token).ConfigureAwait(false);
+
+            // The single Owner account is never linked implicitly: it must keep password login.
+            if (user is { Level: UserLevel.Owner })
+                throw new OidcLoginException("owner", "The owner account cannot sign in through single sign-on.");
 
             if (user == null)
             {
                 if (!options.AutoRegister)
                     throw new OidcLoginException("no_account", $"No Rensaio account matches '{username}'. Ask an administrator to create one.");
 
-                UserLevel level = options.HasGroupMapping ? MapLevel(options, groups) : options.DefaultLevel;
+                UserLevel level = options.HasGroupMapping && hasGroupsClaim ? MapLevel(options, groups) : options.SafeDefaultLevel;
                 user = await _userCommandService.CreateUserAsync(username, level, token).ConfigureAwait(false);
                 created = true;
             }
@@ -349,7 +383,8 @@ public class OidcService
             throw new OidcLoginException("inactive", "This account is disabled.");
 
         // Group → level sync on every login. The Owner is never touched and never granted.
-        if (!created && options.HasGroupMapping && user.Level != UserLevel.Owner)
+        // A login without the groups claim at all is left alone rather than demoted.
+        if (!created && options.HasGroupMapping && hasGroupsClaim && user.Level != UserLevel.Owner)
         {
             UserLevel mapped = MapLevel(options, groups);
             if (mapped != user.Level)
@@ -425,32 +460,57 @@ public class OidcService
             return UserLevel.Admin;
         if (!string.IsNullOrWhiteSpace(options.ManagerGroup) && groups.Contains(options.ManagerGroup, StringComparer.Ordinal))
             return UserLevel.Manager;
-        return options.DefaultLevel == UserLevel.Owner ? UserLevel.User : options.DefaultLevel;
+        return options.SafeDefaultLevel;
+    }
+
+    /// <summary>
+    /// Finds the user to link on first login: an exact username match first, then a
+    /// case-insensitive one only if it is unambiguous (usernames use a BINARY collation,
+    /// so 'Admin' and 'admin' may both exist).
+    /// </summary>
+    private async Task<UserEntity?> FindUserByNameAsync(string username, CancellationToken token)
+    {
+        UserEntity? exact = await _db.Users.FirstOrDefaultAsync(u => u.Username == username, token).ConfigureAwait(false);
+        if (exact != null)
+            return exact;
+
+        string lowered = username.ToLowerInvariant();
+        var candidates = await _db.Users.Where(u => u.Username.ToLower() == lowered).Take(2).ToListAsync(token).ConfigureAwait(false);
+        if (candidates.Count > 1)
+            throw new OidcLoginException("no_account", $"More than one Rensaio account matches '{username}'. Ask an administrator to link it.");
+        return candidates.SingleOrDefault();
     }
 
     // ---------------------------------------------------------------------
     // Step 4: hand the session to the browser
     // ---------------------------------------------------------------------
 
+    private sealed record PendingExchange(Guid UserId, bool RememberMe, string Binder);
+
     /// <summary>
-    /// Issues a one-time code the login page exchanges for a session via POST.
-    /// The token never travels in a URL and the code dies after one use or one minute.
+    /// Issues a one-time code the login page exchanges for a session via POST, plus a
+    /// random binder the controller stores in an HttpOnly cookie. The exchange only
+    /// succeeds from the browser that completed the callback, so a code pasted into
+    /// someone else's browser (login CSRF) is useless. Both die after one use or one minute.
     /// </summary>
-    public string CreateExchangeCode(Guid userId, bool rememberMe)
+    public (string Code, string Binder) CreateExchangeCode(Guid userId, bool rememberMe)
     {
         string code = RandomUrlSafe(32);
-        _cache.Set(ExchangeCachePrefix + code, (userId, rememberMe), ExchangeLifetime);
-        return code;
+        string binder = RandomUrlSafe(32);
+        _cache.Set(ExchangeCachePrefix + code, new PendingExchange(userId, rememberMe, binder), ExchangeLifetime);
+        return (code, binder);
     }
 
-    public (Guid UserId, bool RememberMe)? ConsumeExchangeCode(string code)
+    public (Guid UserId, bool RememberMe)? ConsumeExchangeCode(string? code, string? binder)
     {
-        if (string.IsNullOrWhiteSpace(code))
+        if (string.IsNullOrWhiteSpace(code) || string.IsNullOrWhiteSpace(binder))
             return null;
-        if (!_cache.TryGetValue(ExchangeCachePrefix + code, out (Guid, bool) entry))
+        if (!_cache.TryGetValue(ExchangeCachePrefix + code, out PendingExchange? entry) || entry == null)
             return null;
         _cache.Remove(ExchangeCachePrefix + code);
-        return entry;
+        if (!CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(entry.Binder), Encoding.UTF8.GetBytes(binder)))
+            return null;
+        return (entry.UserId, entry.RememberMe);
     }
 
     /// <summary>Returns the ids of users that have at least one linked external login.</summary>
@@ -458,17 +518,6 @@ public class OidcService
     {
         var ids = await _db.UserExternalLogins.Select(l => l.UserId).Distinct().ToListAsync(token).ConfigureAwait(false);
         return ids.ToHashSet();
-    }
-
-    private static string? FirstNonEmpty(ClaimsPrincipal principal, params string[] claimTypes)
-    {
-        foreach (string type in claimTypes.Where(t => !string.IsNullOrWhiteSpace(t)).Distinct())
-        {
-            string? value = principal.FindFirst(type)?.Value;
-            if (!string.IsNullOrWhiteSpace(value))
-                return value.Trim();
-        }
-        return null;
     }
 
     private static string RandomUrlSafe(int bytes) => Base64UrlEncoder.Encode(RandomNumberGenerator.GetBytes(bytes));

@@ -21,6 +21,8 @@ namespace RensaioBackend.Controllers;
 public class OidcController : ControllerBase
 {
     private const string StateCookie = "rensaio_oidc_state";
+    private const string ExchangeCookie = "rensaio_oidc_exchange";
+    private const string CookiePath = "/api/auth/oidc";
 
     private readonly OidcService _oidc;
     private readonly JwtTokenService _jwtTokenService;
@@ -68,14 +70,7 @@ public class OidcController : ControllerBase
 
             // Bind the state to this browser. Lax (not Strict) because the callback arrives
             // as a top-level navigation from the provider's site.
-            Response.Cookies.Append(StateCookie, state, new CookieOptions
-            {
-                HttpOnly = true,
-                Secure = Request.IsHttps,
-                SameSite = SameSiteMode.Lax,
-                MaxAge = TimeSpan.FromMinutes(10),
-                Path = "/api/auth/oidc",
-            });
+            Response.Cookies.Append(StateCookie, state, ShortLivedCookie(TimeSpan.FromMinutes(10)));
 
             return Redirect(url);
         }
@@ -103,7 +98,7 @@ public class OidcController : ControllerBase
         CancellationToken token = default)
     {
         string? cookieState = Request.Cookies[StateCookie];
-        Response.Cookies.Delete(StateCookie, new CookieOptions { Path = "/api/auth/oidc" });
+        Response.Cookies.Delete(StateCookie, new CookieOptions { Path = CookiePath });
 
         if (!string.IsNullOrWhiteSpace(error))
         {
@@ -128,7 +123,9 @@ public class OidcController : ControllerBase
         try
         {
             var result = await _oidc.HandleCallbackAsync(options, code, state, token);
-            string exchange = _oidc.CreateExchangeCode(result.User.Id, result.RememberMe);
+            var (exchange, binder) = _oidc.CreateExchangeCode(result.User.Id, result.RememberMe);
+            // Bind the one-time code to this browser; /exchange requires the cookie back.
+            Response.Cookies.Append(ExchangeCookie, binder, ShortLivedCookie(TimeSpan.FromMinutes(1)));
             string target = $"/login?sso={Uri.EscapeDataString(exchange)}&returnTo={Uri.EscapeDataString(result.ReturnTo)}";
             return Redirect(target);
         }
@@ -150,7 +147,10 @@ public class OidcController : ControllerBase
     [HttpPost("/api/auth/oidc/exchange")]
     public async Task<ActionResult<LoginResponseDto>> Exchange([FromBody] OidcExchangeRequestDto request, CancellationToken token)
     {
-        var entry = _oidc.ConsumeExchangeCode(request.Code);
+        string? binder = Request.Cookies[ExchangeCookie];
+        Response.Cookies.Delete(ExchangeCookie, new CookieOptions { Path = CookiePath });
+
+        var entry = _oidc.ConsumeExchangeCode(request.Code, binder);
         if (entry == null)
             return Unauthorized(new { error = "Login code is invalid or expired" });
 
@@ -184,6 +184,20 @@ public class OidcController : ControllerBase
     }
 
     private static string LoginErrorUrl(string code) => "/login?error=" + Uri.EscapeDataString("oidc_" + code);
+
+    /// <summary>
+    /// HttpOnly, path-scoped, Lax (not Strict) because the callback arrives as a top-level
+    /// navigation from the provider's site. Secure follows the request so plain-HTTP LAN
+    /// installs keep working.
+    /// </summary>
+    private CookieOptions ShortLivedCookie(TimeSpan maxAge) => new()
+    {
+        HttpOnly = true,
+        Secure = Request.IsHttps,
+        SameSite = SameSiteMode.Lax,
+        MaxAge = maxAge,
+        Path = CookiePath,
+    };
 
     /// <summary>Only same-origin absolute paths are accepted as a post-login destination.</summary>
     private static bool IsLocalPath(string? path) =>

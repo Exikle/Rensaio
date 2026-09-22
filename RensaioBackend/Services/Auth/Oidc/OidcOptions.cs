@@ -55,6 +55,12 @@ public class OidcOptions
     /// <summary>Mirror the provider's 'picture' claim onto the user's avatar on every login.</summary>
     public bool SyncAvatar { get; set; } = true;
 
+    /// <summary>
+    /// Set when the "Oidc" configuration section could not be bound (e.g. a malformed
+    /// boolean in an environment variable). The stored/default values are used instead.
+    /// </summary>
+    public string? BindError { get; private set; }
+
     public bool HasGroupMapping =>
         !string.IsNullOrWhiteSpace(GroupsClaim)
         && (!string.IsNullOrWhiteSpace(AdminGroup) || !string.IsNullOrWhiteSpace(ManagerGroup));
@@ -62,8 +68,12 @@ public class OidcOptions
     public bool IsConfigured =>
         Enabled && !string.IsNullOrWhiteSpace(Issuer) && !string.IsNullOrWhiteSpace(ClientId);
 
+    /// <summary>The Owner level can only be held by the single owner account, never handed out by SSO.</summary>
+    public UserLevel SafeDefaultLevel => DefaultLevel == UserLevel.Owner ? UserLevel.User : DefaultLevel;
+
     /// <summary>
     /// Merges stored settings with configuration. Configuration wins for any key it defines.
+    /// Never throws: a malformed configuration section is reported via <see cref="BindError"/>.
     /// </summary>
     public static OidcOptions Resolve(IConfiguration configuration, EditableSettingsDto settings)
     {
@@ -76,12 +86,20 @@ public class OidcOptions
             ButtonLabel = settings.OidcButtonLabel,
         };
 
-        // Bind advanced options plus any basic overrides from the "Oidc" section.
-        // Bind() only touches keys that exist, so stored values survive when unset.
-        configuration.GetSection(SectionName).Bind(options);
+        try
+        {
+            // Bind() only touches keys that exist, so stored values survive when unset.
+            configuration.GetSection(SectionName).Bind(options);
+        }
+        catch (Exception ex)
+        {
+            options.BindError = ex.Message;
+        }
 
-        options.Issuer = options.Issuer.Trim().TrimEnd('/');
-        options.ClientId = options.ClientId.Trim();
+        options.Issuer = (options.Issuer ?? string.Empty).Trim().TrimEnd('/');
+        options.ClientId = (options.ClientId ?? string.Empty).Trim();
+        options.ClientSecret ??= string.Empty;
+        options.UsernameClaim = string.IsNullOrWhiteSpace(options.UsernameClaim) ? "preferred_username" : options.UsernameClaim.Trim();
         if (string.IsNullOrWhiteSpace(options.ButtonLabel))
             options.ButtonLabel = "Single Sign-On";
         return options;
@@ -89,12 +107,12 @@ public class OidcOptions
 
     /// <summary>
     /// True when any basic value is supplied through configuration, meaning the
-    /// Settings page fields are informational only.
+    /// Settings page fields are informational only. Never throws.
     /// </summary>
     public static bool IsManagedByConfig(IConfiguration configuration)
     {
         var section = configuration.GetSection(SectionName);
-        return section.GetValue<bool?>("Enabled") != null
+        return !string.IsNullOrWhiteSpace(section["Enabled"])
             || !string.IsNullOrWhiteSpace(section["Issuer"])
             || !string.IsNullOrWhiteSpace(section["ClientId"])
             || !string.IsNullOrWhiteSpace(section["ClientSecret"]);
