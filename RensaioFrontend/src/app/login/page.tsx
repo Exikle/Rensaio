@@ -16,6 +16,7 @@ const OIDC_ERRORS: Record<string, string> = {
   oidc_denied: 'Sign-in was cancelled at the identity provider.',
   oidc_no_account: 'No Rensaiō account matches your identity. Ask an administrator to create one.',
   oidc_inactive: 'This account is disabled.',
+  oidc_owner: 'The owner account must log in with its password.',
   oidc_state: 'The sign-in request expired. Please try again.',
   oidc_token: 'The identity provider response could not be verified. Please try again.',
   oidc_claims: 'The identity provider did not return a username. Check the OIDC claim settings.',
