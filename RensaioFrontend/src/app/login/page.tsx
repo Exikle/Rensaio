@@ -37,6 +37,9 @@ function LoginForm() {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const ssoHandled = useRef(false);
+  // Once anything has gone wrong on this page, never auto-redirect again: the user
+  // must see the error and click the button themselves.
+  const autoRedirectBlocked = useRef(false);
 
   const ssoCode = searchParams.get('sso');
   const ssoError = searchParams.get('error');
@@ -55,6 +58,7 @@ function LoginForm() {
   // Surface an error the OIDC callback redirected back with
   useEffect(() => {
     if (ssoError) {
+      autoRedirectBlocked.current = true;
       setError(OIDC_ERRORS[ssoError] ?? 'Single sign-on failed.');
     }
   }, [ssoError]);
@@ -68,6 +72,7 @@ function LoginForm() {
     setLoading(true);
     const returnTo = searchParams.get('returnTo') || '/library';
     completeSsoLogin(ssoCode, returnTo).catch((err) => {
+      autoRedirectBlocked.current = true;
       setError(err instanceof Error ? err.message : 'Single sign-on failed.');
       setLoading(false);
       // Drop the spent code from the URL so a refresh shows the form, not the same error
@@ -79,6 +84,7 @@ function LoginForm() {
   // or the user just logged out (they get the page with the button instead).
   useEffect(() => {
     if (authLoading || !oidc?.enabled || !oidc.autoRedirect || ssoCode || ssoError) return;
+    if (autoRedirectBlocked.current || ssoHandled.current) return;
     let justLoggedOut = false;
     try {
       justLoggedOut = sessionStorage.getItem('rensaio_logged_out') === '1';

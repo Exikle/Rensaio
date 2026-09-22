@@ -93,7 +93,10 @@ public class OidcOptions
         }
         catch (Exception ex)
         {
+            // Bind() stops at the first bad value, leaving later keys unbound. Running with a
+            // half-applied configuration is worse than not running, so fail closed.
             options.BindError = ex.Message;
+            options.Enabled = false;
         }
 
         options.Issuer = (options.Issuer ?? string.Empty).Trim().TrimEnd('/');

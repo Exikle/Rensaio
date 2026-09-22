@@ -362,6 +362,10 @@ public class OidcService
                 if (!options.AutoRegister)
                     throw new OidcLoginException("no_account", $"No Rensaio account matches '{username}'. Ask an administrator to create one.");
 
+                // Same rule as POST /api/users.
+                if (username.Length < 3 || username.Length > 32)
+                    throw new OidcLoginException("claims", $"Username '{username}' from the identity provider must be between 3 and 32 characters.");
+
                 UserLevel level = options.HasGroupMapping && hasGroupsClaim ? MapLevel(options, groups) : options.SafeDefaultLevel;
                 user = await _userCommandService.CreateUserAsync(username, level, token).ConfigureAwait(false);
                 created = true;
@@ -507,9 +511,11 @@ public class OidcService
             return null;
         if (!_cache.TryGetValue(ExchangeCachePrefix + code, out PendingExchange? entry) || entry == null)
             return null;
-        _cache.Remove(ExchangeCachePrefix + code);
+        // Compare before removing: a stray request without the binder must not be able to
+        // burn the code out from under the browser that legitimately holds it.
         if (!CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(entry.Binder), Encoding.UTF8.GetBytes(binder)))
             return null;
+        _cache.Remove(ExchangeCachePrefix + code);
         return (entry.UserId, entry.RememberMe);
     }
 
