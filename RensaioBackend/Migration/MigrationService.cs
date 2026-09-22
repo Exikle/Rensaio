@@ -146,13 +146,13 @@ public class MigrationService
         // this service runs (e.g. a hosted service querying Settings) makes SQLite create an
         // empty file, which would otherwise be mistaken for a Kaizoku v1 database below,
         // moved aside as "_1.0_backup", and leave a fresh install unable to start.
-        if (File.Exists(newDatabasePath) && new FileInfo(newDatabasePath).Length == 0)
-        {
+        // The file is kept (other connections may already hold it open); EnsureCreated
+        // builds the schema inside an empty database just as it would for a missing one.
+        bool isEmptyFile = File.Exists(newDatabasePath) && new FileInfo(newDatabasePath).Length == 0;
+        if (isEmptyFile)
             _logger.LogInformation("Empty database file found at {Path}; treating as a new installation.", newDatabasePath);
-            File.Delete(newDatabasePath);
-        }
 
-        if (!File.Exists(newDatabasePath))
+        if (!File.Exists(newDatabasePath) || isEmptyFile)
         {
             _logger.LogInformation("No existing database found at {Path}. Assuming new installation.", newDatabasePath);
             var newDbOptions2 = new DbContextOptionsBuilder<AppDbContext>()
