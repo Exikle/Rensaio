@@ -69,7 +69,8 @@ namespace RensaioBackend.Controllers
         {
             try
             {
-                var settings = await _settingsService.GetSettingsAsync(token).ConfigureAwait(false);
+                // Every logged-in user can read settings; the OIDC client secret is blanked.
+                var settings = await _settingsService.GetSettingsForClientAsync(token).ConfigureAwait(false);
                 return Ok(settings);
             }
             catch (Exception ex)

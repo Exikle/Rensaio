@@ -861,7 +861,7 @@ public class McpToolService
 
     private async Task<object> GetSettingsAsync(UserEntity user, JsonElement args, CancellationToken token)
     {
-        var settings = await _settings.GetSettingsAsync(token);
+        var settings = await _settings.GetSettingsForClientAsync(token);
         return new { success = true, data = settings };
     }
 

@@ -3,6 +3,7 @@ using RensaioBackend.Models.Dto;
 using RensaioBackend.Models.Enums;
 using RensaioBackend.Extensions;
 using RensaioBackend.Services.Auth;
+using RensaioBackend.Services.Auth.Oidc;
 using RensaioBackend.Services.Users;
 using RensaioBackend.Services.Settings;
 using RensaioBackend.Services.Series;
@@ -19,19 +20,22 @@ public class UserController : ControllerBase
     private readonly UserInviteService _userInviteService;
     private readonly SettingsService _settingsService;
     private readonly SeriesCommandService _seriesCommandService;
+    private readonly OidcService _oidcService;
 
     public UserController(
         UserQueryService userQueryService,
         UserCommandService userCommandService,
         UserInviteService userInviteService,
         SettingsService settingsService,
-        SeriesCommandService seriesCommandService)
+        SeriesCommandService seriesCommandService,
+        OidcService oidcService)
     {
         _userQueryService = userQueryService;
         _userCommandService = userCommandService;
         _userInviteService = userInviteService;
         _settingsService = settingsService;
         _seriesCommandService = seriesCommandService;
+        _oidcService = oidcService;
     }
 
     /// <summary>
@@ -50,7 +54,13 @@ public class UserController : ControllerBase
     public async Task<ActionResult<List<UserDto>>> ListUsers(CancellationToken token)
     {
         var users = await _userQueryService.ListUsersAsync(token);
-        var result = users.Select(UserDto.FromEntity).ToList();
+        var linked = await _oidcService.GetLinkedUserIdsAsync(token);
+        var result = users.Select(u =>
+        {
+            var dto = UserDto.FromEntity(u);
+            dto.HasExternalLogin = linked.Contains(u.Id);
+            return dto;
+        }).ToList();
         return Ok(result);
     }
 

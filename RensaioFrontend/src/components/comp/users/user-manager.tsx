@@ -182,6 +182,7 @@ export function UserManager() {
                 <TableHead>OPDS Path</TableHead>
                 <TableHead>Active</TableHead>
                 <TableHead>Password</TableHead>
+                <TableHead>Sign-in</TableHead>
                 <TableHead>Last Login</TableHead>
                 <TableHead className="w-16">Actions</TableHead>
               </TableRow>
@@ -220,6 +221,19 @@ export function UserManager() {
                       ) : (
                         <Badge variant="outline" className="text-amber-600 border-amber-300">Not set</Badge>
                       )}
+                    </TableCell>
+                    <TableCell>
+                      <div className="flex flex-wrap gap-1">
+                        {user.hasPassword && (
+                          <Badge variant="outline">Local</Badge>
+                        )}
+                        {user.hasExternalLogin && (
+                          <Badge variant="outline" className="text-sky-600 border-sky-300">SSO</Badge>
+                        )}
+                        {!user.hasPassword && !user.hasExternalLogin && (
+                          <span className="text-xs text-muted-foreground">—</span>
+                        )}
+                      </div>
                     </TableCell>
                     <TableCell className="text-sm text-muted-foreground">
                       {user.lastLoginAt
@@ -264,7 +278,7 @@ export function UserManager() {
                 ))
               ) : (
                 [<TableRow key="empty-state">
-                  <TableCell colSpan={8} className="text-center text-muted-foreground py-8">
+                  <TableCell colSpan={9} className="text-center text-muted-foreground py-8">
                     No users yet. Create the first user using the form above.
                   </TableCell>
                 </TableRow>]

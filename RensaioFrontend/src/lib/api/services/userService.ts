@@ -38,6 +38,11 @@ export const userService = {
     return apiClient.post<LoginResponse>('/api/auth/set-password', data);
   },
 
+  /** Trades the one-time code from the OIDC callback for a session. */
+  async exchangeOidcCode(code: string): Promise<LoginResponse> {
+    return apiClient.post<LoginResponse>('/api/auth/oidc/exchange', { code });
+  },
+
   async changePassword(data: ChangePasswordRequest): Promise<void> {
     return apiClient.post<void>('/api/auth/change-password', data);
   },

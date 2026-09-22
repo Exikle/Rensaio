@@ -103,6 +103,27 @@ public class EditableSettingsDto
     [JsonPropertyName("externalDomain")]
     public string ExternalDomain { get; set; } = string.Empty;
 
+    // --- OpenID Connect (single sign-on) ---
+    // Only the basics live here so the Settings page stays simple.
+    // Advanced options (claims, group mapping, auto-register, ...) are read
+    // from the "Oidc" section of appsettings.json / environment variables,
+    // which also override these values when set.
+
+    [JsonPropertyName("oidcEnabled")]
+    public bool OidcEnabled { get; set; } = false;
+
+    [JsonPropertyName("oidcIssuer")]
+    public string OidcIssuer { get; set; } = string.Empty;
+
+    [JsonPropertyName("oidcClientId")]
+    public string OidcClientId { get; set; } = string.Empty;
+
+    [JsonPropertyName("oidcClientSecret")]
+    public string OidcClientSecret { get; set; } = string.Empty;
+
+    [JsonPropertyName("oidcButtonLabel")]
+    public string OidcButtonLabel { get; set; } = "Single Sign-On";
+
     // --- Contribution Settings ---
 
     [JsonPropertyName("contributionEnabled")]

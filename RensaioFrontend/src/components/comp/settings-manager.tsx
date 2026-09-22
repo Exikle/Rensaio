@@ -12,6 +12,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
+import { Checkbox } from "@/components/ui/checkbox";
 import { useAuth } from "@/contexts/auth-context";
 import { useMutation } from "@tanstack/react-query";
 import { userService } from "@/lib/api/services/userService";
@@ -1157,6 +1158,7 @@ function SecuritySection({
   setLocalSettings: (updater: (prev: Settings) => Settings) => void;
 }) {
   const authEnabled = localSettings.authenticationEnabled;
+  const oidcLocked = localSettings.oidcManagedByConfig === true;
   const externalDomainError = getExternalDomainError(
     localSettings.externalDomain || "",
   );
@@ -1200,6 +1202,119 @@ function SecuritySection({
           accessed from outside your local network (e.g. a reverse proxy). When left
           empty, links are generated from the address you're currently using to reach
           the app (e.g. http://192.168.x.x:9833), so users on your LAN get working links.
+        </p>
+      </div>
+
+      <div className="space-y-3 border-t pt-4">
+        <div className="flex items-center space-x-2">
+          <Switch
+            id="oidc-enabled"
+            checked={localSettings.oidcEnabled}
+            disabled={oidcLocked || !authEnabled}
+            onCheckedChange={(checked) =>
+              setLocalSettings((prev) => ({ ...prev, oidcEnabled: checked }))
+            }
+          />
+          <Label htmlFor="oidc-enabled">Single Sign-On (OpenID Connect)</Label>
+        </div>
+        <p className="text-xs text-muted-foreground">
+          Let users log in with an identity provider such as Authentik, Keycloak,
+          Pocket ID or Authelia. Requires authentication to be enabled. Register a
+          client at your provider with the callback URL{" "}
+          <code className="font-mono">
+            {(localSettings.externalDomain || "https://your-rensaio").replace(/\/$/, "")}
+            /api/auth/oidc/callback
+          </code>
+          .
+        </p>
+        {oidcLocked && (
+          <p className="text-xs text-amber-600 dark:text-amber-400">
+            These values come from appsettings.json or environment variables and
+            cannot be changed here.
+          </p>
+        )}
+        {localSettings.oidcConfigError && (
+          <p className="text-xs text-red-600 dark:text-red-400">
+            The Oidc configuration could not be read, so single sign-on is off:{" "}
+            {localSettings.oidcConfigError}
+          </p>
+        )}
+        <div className="space-y-2">
+          <Label htmlFor="oidc-issuer">Issuer URL</Label>
+          <Input
+            id="oidc-issuer"
+            value={localSettings.oidcIssuer || ""}
+            disabled={oidcLocked || !authEnabled}
+            onChange={(e) =>
+              setLocalSettings((prev) => ({ ...prev, oidcIssuer: e.target.value }))
+            }
+            placeholder="https://id.example.com"
+          />
+        </div>
+        <div className="space-y-2">
+          <Label htmlFor="oidc-client-id">Client ID</Label>
+          <Input
+            id="oidc-client-id"
+            value={localSettings.oidcClientId || ""}
+            disabled={oidcLocked || !authEnabled}
+            onChange={(e) =>
+              setLocalSettings((prev) => ({ ...prev, oidcClientId: e.target.value }))
+            }
+            placeholder="rensaio"
+          />
+        </div>
+        <div className="space-y-2">
+          <Label htmlFor="oidc-client-secret">Client Secret</Label>
+          <Input
+            id="oidc-client-secret"
+            type="password"
+            value={localSettings.oidcClientSecret || ""}
+            disabled={oidcLocked || !authEnabled}
+            onChange={(e) =>
+              setLocalSettings((prev) => ({ ...prev, oidcClientSecret: e.target.value }))
+            }
+            placeholder={
+              localSettings.oidcClientSecretSet && !localSettings.oidcClearClientSecret
+                ? "•••••••• (stored — leave empty to keep)"
+                : "Leave empty for a public client (PKCE only)"
+            }
+          />
+          {localSettings.oidcClientSecretSet && !oidcLocked && (
+            <div className="flex items-center space-x-2">
+              <Checkbox
+                id="oidc-clear-secret"
+                checked={!!localSettings.oidcClearClientSecret}
+                disabled={!authEnabled}
+                onCheckedChange={(checked) =>
+                  setLocalSettings((prev) => ({
+                    ...prev,
+                    oidcClearClientSecret: checked === true,
+                    oidcClientSecret: checked === true ? "" : prev.oidcClientSecret,
+                  }))
+                }
+              />
+              <Label htmlFor="oidc-clear-secret" className="text-xs font-normal cursor-pointer">
+                Remove the stored secret on save (public client)
+              </Label>
+            </div>
+          )}
+        </div>
+        <div className="space-y-2">
+          <Label htmlFor="oidc-button-label">Login button label</Label>
+          <Input
+            id="oidc-button-label"
+            value={localSettings.oidcButtonLabel || ""}
+            disabled={oidcLocked || !authEnabled}
+            onChange={(e) =>
+              setLocalSettings((prev) => ({ ...prev, oidcButtonLabel: e.target.value }))
+            }
+            placeholder="Single Sign-On"
+          />
+        </div>
+        <p className="text-xs text-muted-foreground">
+          Group mapping, auto-registration, claim names and hiding the password form
+          are configured in the <code className="font-mono">Oidc</code> section of
+          appsettings.json. See the README.
         </p>
       </div>
     </CardContent>

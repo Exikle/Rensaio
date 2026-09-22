@@ -39,6 +39,7 @@ namespace RensaioBackend.Data
         public DbSet<HealthStatusEntity> HealthStatuses { get; set; }
         public DbSet<UserEntity> Users { get; set; }
         public DbSet<UserScrobblerConfigEntity> UserScrobblerConfigs { get; set; }
+        public DbSet<UserExternalLoginEntity> UserExternalLogins { get; set; }
         public DbSet<SeriesMappingEntity> SeriesMappings { get; set; }
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
@@ -276,6 +277,19 @@ namespace RensaioBackend.Data
                 entity.Property(u => u.IsActive).IsRequired().HasDefaultValue(true);
                 entity.HasIndex(u => u.Username).IsUnique().HasDatabaseName("IX_User_Username");
                 entity.HasIndex(u => u.OpdsPath).IsUnique().HasDatabaseName("IX_User_OpdsPath");
+            });
+
+            modelBuilder.Entity<UserExternalLoginEntity>(entity =>
+            {
+                entity.HasKey(l => l.Id);
+                entity.Property(l => l.UserId).IsRequired();
+                entity.Property(l => l.Issuer).UseCollation("BINARY").IsRequired();
+                entity.Property(l => l.Subject).UseCollation("BINARY").IsRequired();
+                entity.Property(l => l.CreatedAt).IsRequired();
+                entity.Property(l => l.LastLoginAt).IsRequired(false);
+                entity.HasOne(l => l.User).WithMany().HasForeignKey(l => l.UserId).OnDelete(DeleteBehavior.Cascade);
+                entity.HasIndex(l => new { l.Issuer, l.Subject }).IsUnique().HasDatabaseName("IX_UserExternalLogin_Issuer_Subject");
+                entity.HasIndex(l => l.UserId).HasDatabaseName("IX_UserExternalLogin_UserId");
             });
 
             modelBuilder.Entity<UserScrobblerConfigEntity>(entity =>

@@ -130,6 +130,7 @@ public class AuthMiddleware
         if (pathStr.StartsWith("/api/auth/select-user", StringComparison.OrdinalIgnoreCase)) return true;
         if (pathStr.StartsWith("/api/auth/refresh", StringComparison.OrdinalIgnoreCase)) return true;
         if (pathStr.StartsWith("/api/auth/set-password", StringComparison.OrdinalIgnoreCase)) return true;
+        if (pathStr.StartsWith("/api/auth/oidc/", StringComparison.OrdinalIgnoreCase)) return true;
 
         // First-user creation (only when no users exist)
         if (pathStr.StartsWith("/api/users/first", StringComparison.OrdinalIgnoreCase) && method == "POST") return true;

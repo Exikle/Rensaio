@@ -222,6 +222,9 @@ namespace RensaioBackend.Services
             services.TryAddScoped<UserInviteService>();
             services.TryAddScoped<UserQueryService>();
             services.TryAddScoped<UserCommandService>();
+            services.AddHttpClient(Auth.Oidc.OidcService.HttpClientName, client => client.Timeout = TimeSpan.FromSeconds(15));
+            services.TryAddSingleton<Auth.Oidc.OidcDiscoveryCache>();
+            services.TryAddScoped<Auth.Oidc.OidcService>();
             return services;
         }
 
