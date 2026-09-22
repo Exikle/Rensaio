@@ -149,7 +149,7 @@ public class OidcService
         _cache.Remove(StateCachePrefix + state);
 
         var discovery = await _discovery.GetAsync(options.Issuer, token).ConfigureAwait(false);
-        string idToken = await ExchangeCodeAsync(options, discovery, code, pending, token).ConfigureAwait(false);
+        var (idToken, accessToken) = await ExchangeCodeAsync(options, discovery, code, pending, token).ConfigureAwait(false);
         ClaimsPrincipal principal = ValidateIdToken(options, discovery, idToken, pending.Nonce);
 
         string? subject = principal.FindFirst("sub")?.Value ?? principal.FindFirst(ClaimTypes.NameIdentifier)?.Value;
@@ -158,11 +158,71 @@ public class OidcService
 
         string issuer = principal.FindFirst("iss")?.Value ?? options.Issuer;
 
+        // Some providers keep profile/group claims out of the ID token and only serve
+        // them from userinfo. Fetch it when something we need is missing.
+        bool needsUsername = principal.FindFirst(options.UsernameClaim) == null;
+        bool needsGroups = options.HasGroupMapping && principal.FindFirst(options.GroupsClaim) == null;
+        bool needsPicture = options.SyncAvatar && principal.FindFirst("picture") == null;
+        if ((needsUsername || needsGroups || needsPicture) && !string.IsNullOrWhiteSpace(accessToken))
+            principal = await MergeUserInfoAsync(discovery, accessToken, subject, principal, token).ConfigureAwait(false);
+
         UserEntity user = await ResolveUserAsync(options, issuer, subject, principal, token).ConfigureAwait(false);
         return new CallbackResult(user, pending.RememberMe, pending.ReturnTo);
     }
 
-    private async Task<string> ExchangeCodeAsync(OidcOptions options, OpenIdConnectConfiguration discovery, string code, PendingLogin pending, CancellationToken token)
+    /// <summary>
+    /// Calls the userinfo endpoint and adds any claims the ID token did not carry.
+    /// Failures are non-fatal: the caller falls back to what the ID token had.
+    /// </summary>
+    private async Task<ClaimsPrincipal> MergeUserInfoAsync(OpenIdConnectConfiguration discovery, string accessToken, string subject, ClaimsPrincipal principal, CancellationToken token)
+    {
+        if (string.IsNullOrWhiteSpace(discovery.UserInfoEndpoint))
+            return principal;
+
+        try
+        {
+            var http = _httpClientFactory.CreateClient(HttpClientName);
+            using var request = new HttpRequestMessage(HttpMethod.Get, discovery.UserInfoEndpoint);
+            request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
+            using var response = await http.SendAsync(request, token).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode)
+                return principal;
+
+            string body = await response.Content.ReadAsStringAsync(token).ConfigureAwait(false);
+            using var json = JsonDocument.Parse(body);
+            if (json.RootElement.ValueKind != JsonValueKind.Object)
+                return principal;
+
+            // The userinfo response must describe the same subject as the ID token.
+            if (json.RootElement.TryGetProperty("sub", out var subElement) && subElement.GetString() != subject)
+                return principal;
+
+            var identity = new ClaimsIdentity(principal.Identity);
+            foreach (var property in json.RootElement.EnumerateObject())
+            {
+                if (identity.HasClaim(c => c.Type == property.Name))
+                    continue;
+                if (property.Value.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var item in property.Value.EnumerateArray())
+                        if (item.ValueKind == JsonValueKind.String)
+                            identity.AddClaim(new Claim(property.Name, item.GetString()!));
+                }
+                else if (property.Value.ValueKind is JsonValueKind.String or JsonValueKind.Number or JsonValueKind.True or JsonValueKind.False)
+                {
+                    identity.AddClaim(new Claim(property.Name, property.Value.ToString()));
+                }
+            }
+            return new ClaimsPrincipal(identity);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogDebug(ex, "OIDC userinfo request failed; continuing with ID token claims");
+            return principal;
+        }
+    }
+
+    private async Task<(string IdToken, string? AccessToken)> ExchangeCodeAsync(OidcOptions options, OpenIdConnectConfiguration discovery, string code, PendingLogin pending, CancellationToken token)
     {
         if (string.IsNullOrWhiteSpace(discovery.TokenEndpoint))
             throw new OidcLoginException("provider", "Provider discovery document has no token_endpoint.");
@@ -191,7 +251,11 @@ public class OidcService
         if (!json.RootElement.TryGetProperty("id_token", out var idTokenElement) || idTokenElement.ValueKind != JsonValueKind.String)
             throw new OidcLoginException("token", "Token response has no id_token. Is the 'openid' scope requested?");
 
-        return idTokenElement.GetString()!;
+        string? accessToken = json.RootElement.TryGetProperty("access_token", out var accessElement) && accessElement.ValueKind == JsonValueKind.String
+            ? accessElement.GetString()
+            : null;
+
+        return (idTokenElement.GetString()!, accessToken);
     }
 
     private ClaimsPrincipal ValidateIdToken(OidcOptions options, OpenIdConnectConfiguration discovery, string idToken, string expectedNonce)
