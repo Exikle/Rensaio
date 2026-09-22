@@ -669,8 +669,10 @@ namespace RensaioBackend.Utils
 
         public static IConfigurationBuilder AddConfigurations(IConfigurationBuilder builder)
         {
-            builder.AddEnvironmentVariables();
+            // Standard .NET precedence: later sources win, so environment variables
+            // override appsettings.json (e.g. Oidc__ClientSecret in Docker).
             builder.SetBasePath(Path).AddJsonFile($"appsettings.json", optional: false, reloadOnChange: true);
+            builder.AddEnvironmentVariables();
             builder.AddInMemoryCollection(new Dictionary<string, string?>
             {
                 { "runtimeDirectory",  Path }
