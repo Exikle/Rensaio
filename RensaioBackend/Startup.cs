@@ -131,8 +131,21 @@ namespace RensaioBackend
                 options.KnownProxies.Clear();
             });
 
-            // Register AppDbContext with SQLite provider, using the connection string from configuration (now points to runtime/rensaio.db)
-            services.AddDbContext<AppDbContext>(options => options.UseSqlite(Configuration.GetConnectionString("DefaultConnection")));
+            // Register AppDbContext on the configured provider. DatabaseConfig is the one
+            // place that reads ConnectionStrings:DefaultConnection and the Database section.
+            var databaseConfig = DatabaseConfig.Resolve(Configuration);
+            services.AddSingleton(databaseConfig);
+            services.AddDbContext<AppDbContext>(options =>
+            {
+                switch (databaseConfig.Provider)
+                {
+                    case DatabaseProvider.Sqlite:
+                        options.UseSqlite(databaseConfig.SqliteConnectionString);
+                        break;
+                    default:
+                        throw new NotSupportedException($"Database provider '{databaseConfig.Provider}' is not available in this build.");
+                }
+            });
 
             // Register ContributionDbContext with SQLite provider, using the derived
             // contributor.db path (sibling of rensaio.db under the runtime directory).

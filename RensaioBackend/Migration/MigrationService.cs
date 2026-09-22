@@ -128,19 +128,14 @@ public class MigrationService
     public async Task<bool> RunAsync(CancellationToken cancellationToken = default)
     {
 
-        string? newDatabasePath = _configuration.GetConnectionString("DefaultConnection");
-        if (string.IsNullOrEmpty(newDatabasePath))
+        var databaseConfig = DatabaseConfig.Resolve(_configuration);
+        if (databaseConfig.Provider != DatabaseProvider.Sqlite)
         {
-            _logger.LogError("DefaultConnection string is not set in configuration; cannot determine database.");
+            // The Kaizoku v1 import and the file-based bootstrap below only apply to SQLite.
+            _logger.LogInformation("Database provider is {Provider}; skipping the SQLite bootstrap and Kaizoku v1 import.", databaseConfig.Provider);
             return false;
         }
-        if (!newDatabasePath.StartsWith("Data Source=", StringComparison.OrdinalIgnoreCase))
-        {
-            _logger.LogError("DefaultConnection string is not in expected format 'Data Source=path'; cannot determine database.");
-            return false;
-        }
-        newDatabasePath = newDatabasePath.Substring("Data Source=".Length).Trim();
-        newDatabasePath = Path.GetFullPath(newDatabasePath);
+        string newDatabasePath = databaseConfig.SqlitePath!;
 
         // A zero-byte file is not a database. Any component that opens a connection before
         // this service runs (e.g. a hosted service querying Settings) makes SQLite create an
