@@ -80,6 +80,9 @@ namespace RensaioBackend
 
             try
             {
+                // A server database must be reachable and migrated before any hosted
+                // service touches it. Throws (and so exits non-zero) when it is not.
+                await RensaioBackend.Data.DatabaseStartup.PrepareAsync(host.Services);
                 await host.RunAsync();
             }
             catch (Exception ex)
