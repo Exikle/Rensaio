@@ -2,20 +2,17 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
-using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using RensaioBackend.Data;
 
 #nullable disable
 
-namespace RensaioBackend.Migrations.Rensaio
+namespace RensaioBackend.Migrations.Rensaio.Sqlite
 {
     [DbContext(typeof(SqliteAppDbContext))]
-    [Migration("20260918203938_RestoreSeriesMappingDeleteCascade")]
-    partial class RestoreSeriesMappingDeleteCascade
+    partial class AppDbContextModelSnapshot : ModelSnapshot
     {
-        /// <inheritdoc />
-        protected override void BuildTargetModel(ModelBuilder modelBuilder)
+        protected override void BuildModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder.HasAnnotation("ProductVersion", "8.0.23");
@@ -854,6 +851,43 @@ namespace RensaioBackend.Migrations.Rensaio
                     b.ToTable("Users");
                 });
 
+            modelBuilder.Entity("RensaioBackend.Models.Database.UserExternalLoginEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Issuer")
+                        .IsRequired()
+                        .HasColumnType("TEXT")
+                        .UseCollation("BINARY");
+
+                    b.Property<DateTime?>("LastLoginAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Subject")
+                        .IsRequired()
+                        .HasColumnType("TEXT")
+                        .UseCollation("BINARY");
+
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("UserId")
+                        .HasDatabaseName("IX_UserExternalLogin_UserId");
+
+                    b.HasIndex("Issuer", "Subject")
+                        .IsUnique()
+                        .HasDatabaseName("IX_UserExternalLogin_Issuer_Subject");
+
+                    b.ToTable("UserExternalLogins");
+                });
+
             modelBuilder.Entity("RensaioBackend.Models.Database.UserScrobblerConfigEntity", b =>
                 {
                     b.Property<Guid>("Id")
@@ -920,6 +954,17 @@ namespace RensaioBackend.Migrations.Rensaio
                         .HasForeignKey("SeriesId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
+                });
+
+            modelBuilder.Entity("RensaioBackend.Models.Database.UserExternalLoginEntity", b =>
+                {
+                    b.HasOne("RensaioBackend.Models.Database.UserEntity", "User")
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("User");
                 });
 
             modelBuilder.Entity("RensaioBackend.Models.Database.UserScrobblerConfigEntity", b =>

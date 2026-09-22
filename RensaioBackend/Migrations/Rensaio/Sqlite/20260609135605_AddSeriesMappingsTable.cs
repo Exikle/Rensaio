@@ -5,7 +5,7 @@ using System;
 
 #nullable disable
 
-namespace RensaioBackend.Migrations.Rensaio
+namespace RensaioBackend.Migrations.Rensaio.Sqlite
 {
     [DbContext(typeof(SqliteAppDbContext))]
     [Migration("20260609135605_AddSeriesMappingsTable")]
