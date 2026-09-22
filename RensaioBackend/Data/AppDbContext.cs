@@ -68,18 +68,24 @@ namespace RensaioBackend.Data
             {
                 entity.HasKey(m => m.Id);
                 entity.Property(m => m.SeriesId).IsRequired(false); // nullable to support series-less/provider-scoped rows
-                entity.Property(m => m.Provider).IsRequired();
+                entity.Property(m => m.Provider).IsRequired().HasConversion<int>();
                 entity.Property(m => m.ExternalSeriesId).UseCollation("BINARY").IsRequired();
                 entity.Property(m => m.ExternalSeriesTitle).UseCollation("BINARY").IsRequired(false);
+                entity.Property(m => m.SeriesCoverUrl).UseCollation("BINARY").IsRequired(false);
                 entity.Property(m => m.MetaData).UseCollation("BINARY").IsRequired(false);
                 entity.Property(m => m.UserUid).IsRequired(false);
-                entity.Property(m => m.UserRole).IsRequired();
+                entity.Property(m => m.UserRole).IsRequired().HasConversion<int>();
                 entity.Property(m => m.UpdateDate).IsRequired();
+                entity.Property(m => m.MappingStatus).HasColumnType("INTEGER").IsRequired();
+                entity.Property(m => m.LinkedDate).IsRequired(false);
                 // LinkedSitesIds: comma-separated "site:id" strings in a TEXT column
                 entity.Property(m => m.LinkedSitesIds).HasStringSplit();
                 // AlternativeTitles: JSON-encoded string[] in a TEXT column
                 entity.Property(m => m.AlternativeTitles).HasJsonConversion<List<string>>();
                 entity.HasIndex(m => new { m.SeriesId, m.Provider }).IsUnique().HasDatabaseName("IX_SeriesMapping_SeriesId_Provider");
+                // Non-unique: enables the mapping-conflict repair pass + ownership guard to find
+                // every series claiming a given (Provider, ExternalSeriesId) quickly.
+                entity.HasIndex(m => new { m.Provider, m.ExternalSeriesId }).HasDatabaseName("IX_SeriesMapping_Provider_ExternalSeriesId");
                 // Deleting a series cascades to its global mappings: a mapping linked to a
                 // removed local series is meaningless, and series-less/decision rows
                 // (SeriesId == null) are untouched by the cascade. Restores the ON DELETE
@@ -308,26 +314,6 @@ namespace RensaioBackend.Data
                 entity.HasIndex(c => new { c.UserId, c.Provider }).IsUnique().HasDatabaseName("IX_UserScrobblerConfig_UserId_Provider");
             });
 
-            modelBuilder.Entity<SeriesMappingEntity>(entity =>
-            {
-                entity.HasKey(m => m.Id);
-                entity.Property(m => m.SeriesId).IsRequired(false); // nullable to support series-less/provider-scoped rows
-                entity.Property(m => m.Provider).IsRequired().HasConversion<int>();
-                entity.Property(m => m.ExternalSeriesId).UseCollation("BINARY").IsRequired();
-                entity.Property(m => m.ExternalSeriesTitle).UseCollation("BINARY").IsRequired(false);
-                entity.Property(m => m.SeriesCoverUrl).UseCollation("BINARY").IsRequired(false);
-                entity.Property(m => m.MetaData).UseCollation("BINARY").IsRequired(false);
-                entity.Property(m => m.LinkedSitesIds).HasStringSplit();
-                entity.Property(m => m.AlternativeTitles).HasJsonConversion<List<string>>();
-                entity.Property(m => m.MappingStatus).HasColumnType("INTEGER").IsRequired();
-                entity.Property(m => m.LinkedDate).IsRequired(false);
-                entity.Property(m => m.UserRole).IsRequired().HasConversion<int>();
-                entity.Property(m => m.UpdateDate).IsRequired();
-                entity.HasIndex(m => new { m.SeriesId, m.Provider }).IsUnique().HasDatabaseName("IX_SeriesMapping_SeriesId_Provider");
-                // Non-unique: enables the mapping-conflict repair pass + ownership guard to find
-                // every series claiming a given (Provider, ExternalSeriesId) quickly.
-                entity.HasIndex(m => new { m.Provider, m.ExternalSeriesId }).HasDatabaseName("IX_SeriesMapping_Provider_ExternalSeriesId");
-            });
         }
     }
 }
