@@ -20,40 +20,45 @@ const INITIAL_CAPACITY = 256; // bytes
 
 /**
  * 64-bit varint of an unsigned value, little-endian base-128.
+ *
+ * MUST use BigInt: JS's bitwise operators (`>>>`, `&`) coerce to 32-bit, so the
+ * previous `v >>>= 7` implementation silently truncated every value >= 2^32.
+ * That corrupted `int64 source_id` fields (real Mihon extension ids can exceed
+ * 2^32), which is why the backend decoded an empty/0 source_id. The value is
+ * coerced to its unsigned 64-bit two's-complement form so negative inputs (i.e.
+ * protobuf int32/int64 = -1 delete markers) emit the canonical 10-byte varint.
  */
 function encodeVarint(value: number): Uint8Array {
+  let v = BigInt(Math.trunc(value)) & 0xffffffffffffffffn;
   const out: number[] = [];
-  let v = value;
   do {
-    let byte = v & 0x7f;
-    v >>>= 7;
-    if (v !== 0) byte |= 0x80;
+    let byte = Number(v & 0x7fn);
+    v >>= 7n;
+    if (v !== 0n) byte |= 0x80;
     out.push(byte);
-  } while (v !== 0);
+  } while (v !== 0n);
   return Uint8Array.from(out);
 }
 
 /**
  * Protobuf int32: negative values are sign-extended to 64 bits then varint
  * encoded (10-byte form), matching reference implementations.
+ *
+ * `encodeVarint` already emits the unsigned 64-bit two's-complement form, so a
+ * negative int32 (e.g. -1) becomes the canonical sign-extended 10-byte varint.
  */
 function encodeInt32(value: number): Uint8Array {
-  // Sign-extend to 64-bit (JS numbers are IEEE doubles; use low 32 then mask).
-  const mask = 0xffffffff;
-  let v = value & mask;
-  if (value < 0) {
-    // two's complement 64-bit representation of a signed 32-bit value:
-    // the upper 32 bits are all 1s.
-    v = v | 0xffffffff00000000;
-  }
-  return encodeVarint(v);
+  return encodeVarint(value);
 }
 
 /**
  * Protobuf uint32.
+ *
+ * `>>> 0` normalizes to an unsigned 32-bit value; without it, values in
+ * [2^31, 2^32) would be seen as negative and sign-extended to 64 bits.
  */
 function encodeUint32(value: number): Uint8Array {
-  return encodeVarint(value & 0xffffffff);
+  return encodeVarint(value >>> 0);
 }
 
 /**
@@ -77,11 +82,19 @@ export class ProtoWriter {
       // Grow geometrically (2×) to amortize allocation cost. Flush full chunks
       // to bound memory and avoid one giant array for huge payloads.
       if (needed + this.offset > DEFAULT_CHUNK_SIZE) {
-        // Far bigger than a chunk: flush the partial buffer and push directly
-        // (no copy), matching the old >chunk behavior.
+        // Far bigger than a chunk: flush the partial buffer and push the large
+        // piece directly.
+        //
+        // CRITICAL: push a COPY, never the caller's buffer by reference. The
+        // codec passes `scratch.finish()` — a subarray VIEW into the shared
+        // scratch writer — and then REUSES that scratch for the next row. If we
+        // aliased the view, the next `scratch.reset()` + writes would overwrite
+        // the bytes already pushed here, corrupting every row that straddles the
+        // 1 MiB boundary (the backend then fails to decode: "Invalid string
+        // length" in ReadString()).
         const left = this.current.subarray(0, this.offset);
         if (left.length > 0) this.chunks.push(left);
-        this.chunks.push(bytes);
+        this.chunks.push(bytes.slice());
         this.current = new Uint8Array(INITIAL_CAPACITY);
         this.offset = 0;
         return;
@@ -100,7 +113,7 @@ export class ProtoWriter {
   /** varint field. */
   varint(field: number, value: number): void {
     this.append(encodeVarint((field << 3) | 0));
-    this.append(encodeVarint(value & 0xffffffff_ffffffff));
+    this.append(encodeVarint(value));
   }
 
   /** int32 (sign-extended) field. */
@@ -117,8 +130,12 @@ export class ProtoWriter {
 
   /** int64 field (low 64 bits). */
   int64(field: number, value: number): void {
+    // No mask: `value & 0xffffffff_ffffffff` is a TRAP — that literal exceeds
+    // 2^53, so JS's ToInt32 turns it into 0 and the AND yields 0 for EVERY
+    // value (source_id was always written as 0 → "empty source_id"). encodeVarint
+    // already reduces to the unsigned 64-bit form.
     this.append(encodeVarint((field << 3) | 0));
-    this.append(encodeVarint(value & 0xffffffff_ffffffff));
+    this.append(encodeVarint(value));
   }
 
   /** bool field. */

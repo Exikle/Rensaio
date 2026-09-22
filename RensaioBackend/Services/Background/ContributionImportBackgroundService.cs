@@ -20,7 +20,7 @@ namespace RensaioBackend.Services.Background
     /// Holds the shared <see cref="ContributionDbGate"/> exclusive lock for the whole
     /// copy+apply so no upload/read interleaves mid-import.
     /// </summary>
-    public sealed class ContributionImportBackgroundService : BackgroundService
+    public sealed class ContributionImportBackgroundService : IWorkerService
     {
         private static readonly TimeSpan DailyInterval = TimeSpan.FromHours(24);
         private static readonly TimeSpan StartupDelay = TimeSpan.FromSeconds(20);
@@ -36,7 +36,7 @@ namespace RensaioBackend.Services.Background
             _logger = logger;
         }
 
-        protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+        public async Task ExecuteAsync(CancellationToken stoppingToken)
         {
             _logger.LogInformation("Contribution import background service started.");
 

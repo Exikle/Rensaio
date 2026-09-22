@@ -172,11 +172,8 @@ namespace RensaioBackend.Services.Contributions
         private async Task<string?> TryFetchSidecarSha256Async(HttpClient client, string repo, CancellationToken token)
         {
             string sidecarUrl = $"https://raw.githubusercontent.com/{repo}/refs/heads/main/metadata.bin.sha256";
-            using var response = await client.GetAsync(sidecarUrl, token).ConfigureAwait(false);
-            if (!response.IsSuccessStatusCode)
-                return null; // 404 (or any failure) → no dedup possible → continue full import
-            string body = await response.Content.ReadAsStringAsync(token).ConfigureAwait(false);
-            return body.Trim();
+            var body = await client.GetByteArrayAsync(sidecarUrl, token).ConfigureAwait(false);
+            return Convert.ToBase64String(body);
         }
 
         /// <summary>

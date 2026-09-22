@@ -133,7 +133,7 @@ namespace RensaioBackend.Services.Bridge
                         if (failureBreakdown != null)
                         {
                             string reason = status.ToString();
-                            int current = (int?)failureBreakdown[reason] ?? 0;
+                            int current = failureBreakdown.GetOrAdd(reason, 0);
                             failureBreakdown[reason] = current + 1;
                         }
                         return null;

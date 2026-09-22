@@ -14,6 +14,8 @@ namespace RensaioBackend.Services.Contributions.Snapshot
     ///
     /// Layout (mirror of worker's utils/crypto.ts + utils/compression.ts):
     ///   - AESKEY256IV is base64(32B key + 16B IV) = 64 base64 chars.
+    ///   - AES-256-CBC with PKCS#7 padding (Web Crypto's default), so decrypt MUST
+    ///     strip padding (PaddingMode.PKCS7), not keep it (PaddingMode.None).
     ///   - After AES decrypt: byte[0] = compression tag (0x00 = ZSTD, 0x01 = Brotli,
     ///     0x02 = raw/uncompressed), followed by the (optionally compressed) protobuf.
     /// </summary>
@@ -24,7 +26,7 @@ namespace RensaioBackend.Services.Contributions.Snapshot
         public const byte TagRaw = 0x02;
 
         /// <summary>
-        /// Full pipeline: AES-256-CBC decrypt → strip tag → decompress.
+        /// Full pipeline: AES-256-CBC decrypt (PKCS#7) → strip tag → decompress.
         /// Returns the raw protobuf bytes ready for <see cref="ContributionProtobufCodec"/>.
         /// </summary>
         public static byte[] DecodeMetadataBin(byte[] encryptedPayload, string aeskey256iv)
@@ -61,7 +63,13 @@ namespace RensaioBackend.Services.Contributions.Snapshot
             aes.Key = key;
             aes.IV = iv;
             aes.Mode = System.Security.Cryptography.CipherMode.CBC;
-            aes.Padding = System.Security.Cryptography.PaddingMode.None;
+            // The worker encrypts with Web Crypto's AES-CBC, which ALWAYS applies
+            // PKCS#7 padding (it produces a strictly larger, 16-byte-aligned
+            // ciphertext). Using PaddingMode.None here kept those trailing pad
+            // bytes, and the protobuf decoder then tried to parse them as fields
+            // → "Truncated varint" / "Invalid string length" at the tail. PKCS7
+            // strips them, matching the Web Crypto decrypt used by the worker.
+            aes.Padding = System.Security.Cryptography.PaddingMode.PKCS7;
 
             using var decryptor = aes.CreateDecryptor();
             return decryptor.TransformFinalBlock(cipher, 0, cipher.Length);

@@ -9,7 +9,7 @@ namespace RensaioBackend.Services.Background;
 /// request triggers a ContributionSnapshotV1 upload of the local contribution
 /// database to the cloud worker, then marks uploaded rows Version -2.
 /// </summary>
-public sealed class ContributionUploadBackgroundService : BackgroundService
+public sealed class ContributionUploadBackgroundService : IWorkerService
 {
     private readonly IContributionUploadQueue _queue;
     private readonly IServiceScopeFactory _scopeFactory;
@@ -25,7 +25,7 @@ public sealed class ContributionUploadBackgroundService : BackgroundService
         _logger = logger;
     }
 
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    public async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _logger.LogInformation("Contribution upload background service started.");
 

@@ -76,7 +76,7 @@ namespace RensaioBackend.Services.Jobs
                 await _jobManagement.ScheduleRecurringJobAsync(JobType.UpdateExtensions, groupKey,
                     groupKey, groupKey, false, settings.ExtensionsCheckForUpdateSchedule, Priority.High, token)
                     .ConfigureAwait(false);
-                _logger.LogInformation("[job] Extension auto-update enabled (interval {Interval}).",
+                _logger.LogInformation("Extension auto-update enabled (interval {Interval}).",
                     settings.ExtensionsCheckForUpdateSchedule);
             }
         }

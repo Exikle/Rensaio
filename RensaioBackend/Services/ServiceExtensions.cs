@@ -171,6 +171,8 @@ namespace RensaioBackend.Services
             services.TryAddSingleton<JobScheduledHostedService>();
             services.AddHostedService<DebouncedScrobblerSyncHostedService>();
             services.TryAddSingleton<MetadataBackgroundScanService>();
+            services.TryAddSingleton<ContributionUploadBackgroundService>();
+            services.TryAddSingleton<ContributionImportBackgroundService>();
             return services;
         }
 

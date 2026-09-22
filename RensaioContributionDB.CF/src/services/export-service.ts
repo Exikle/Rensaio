@@ -53,7 +53,16 @@ async function releaseExportLock(db: D1Database): Promise<void> {
   await db.prepare('DELETE FROM export_lock WHERE id = 1').run();
 }
 
-export async function runDailyExport(env: Env): Promise<{
+/**
+ * Run the export.
+ *
+ * @param force when true, bypass the `hasPendingChanges` gate so a version bump
+ *   + `metadata.bin` push ALWAYS happens. Intended for admin recovery (e.g. the
+ *   exporter code changed and the already-published file must be regenerated
+ *   even though no data changed). The daily cron and the default admin export
+ *   pass `false`, preserving the "skip when nothing is pending" behaviour.
+ */
+export async function runDailyExport(env: Env, force = false): Promise<{
   scrubbed: { sources: number; metadata: number; titles: number };
   orphanTitlesArchived: number;
   files: string[];
@@ -77,13 +86,13 @@ export async function runDailyExport(env: Env): Promise<{
   }
 
   try {
-    return await runExportLocked(env);
+    return await runExportLocked(env, force);
   } finally {
     await releaseExportLock(env.DB);
   }
 }
 
-async function runExportLocked(env: Env): Promise<{
+async function runExportLocked(env: Env, force = false): Promise<{
   scrubbed: { sources: number; metadata: number; titles: number };
   orphanTitlesArchived: number;
   files: string[];
@@ -101,7 +110,9 @@ async function runExportLocked(env: Env): Promise<{
   // 3. Skip the export entirely when no contributor changes are pending.
   //    The version is only bumped (and metadata.bin only pushed) when at least
   //    one upload / admin mutation applied rows since the last export.
-  if (!(await hasPendingChanges(env.DB))) {
+  //    `force` (admin recovery, e.g. after an exporter code fix) bypasses this
+  //    gate so a fresh metadata.bin is always published.
+  if (!force && !(await hasPendingChanges(env.DB))) {
     return {
       scrubbed,
       orphanTitlesArchived,

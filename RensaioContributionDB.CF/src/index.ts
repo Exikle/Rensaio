@@ -16,7 +16,10 @@ import { runDailyExport } from './services/export-service';
  *   POST /upload?contributor={UUID}       → submit a ContributionSnapshotV1 batch
  *   POST /admin/ban?admin={adminUUID}     → ban a contributor (admin only)
  *   POST /admin/clean?admin={adminUUID}   → wipe data tables (admin only)
- *   POST /admin/export?admin={adminUUID}  → run the GitHub export now (admin only)
+ *   POST /admin/export?admin={adminUUID}[&force=1] → run the GitHub export now
+ *                                        (admin only; force=1 bypasses the
+ *                                        pending-changes gate to always bump the
+ *                                        version + re-upload metadata.bin)
  *   GET  /key                            → return the AES key+IV (encryption secret)
  *   GET  /replication                    → return the current Replication Version Number
  *

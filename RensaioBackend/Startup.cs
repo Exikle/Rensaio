@@ -144,19 +144,16 @@ namespace RensaioBackend
             // daily/startup GitHub metadata.bin import pipeline.
             services.AddHttpClient("ContributionUpload");
             services.AddHttpClient("ContributionImport");
+            services.AddHttpClient("ContributionVerification");
             services.TryAddSingleton<IContributionUploadQueue, ContributionUploadQueue>();
             services.TryAddSingleton<ContributionDbGate>();
             services.AddScoped<ContributionUploadService>();
             services.AddScoped<ContributionDownloadService>();
             services.AddScoped<ContributionImportService>();
             services.AddScoped<ContributionToRensaioSyncService>();
-            services.AddHostedService<ContributionUploadBackgroundService>();
-            services.AddHostedService<ContributionImportBackgroundService>();
 
             // Contributor verification against the cloud contribution DB (RensaioContributionDB.CF).
-            services.AddHttpClient("ContributionVerification");
             services.TryAddScoped<ContributionVerificationService>();
-
             services.AddHostedService<StartupHostedService>();
         }
 

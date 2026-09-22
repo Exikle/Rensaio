@@ -53,12 +53,20 @@ adminRoutes.post('/clean', async (c) => {
   return c.json({ cleaned: true, deleted });
 });
 
-// POST /admin/export?admin={adminUUID}
+// POST /admin/export?admin={adminUUID}[&force=1]
+//
+// Without `force`, the export is skipped when nothing is pending (the normal
+// daily-cron semantics). With `force=1` the pending-changes gate is bypassed so
+// the version is bumped and metadata.bin is (re)uploaded regardless — the
+// recovery path for "exporter code changed but the published file must be
+// regenerated" (e.g. after a codec bug fix).
 adminRoutes.post('/export', async (c) => {
   const validation = await getActiveAdmin(c.env.DB, c.req.query('admin') ?? '');
   if (!validation.ok) {
     return c.json<ErrorResponse>({ error: validation.error }, validation.status);
   }
+
+  const force = isTruthy(c.req.query('force'));
 
   // The export pipeline (D1 row load → protobuf → compress → AES → base64 →
   // GitHub push) is CPU-heavy and can exceed the synchronous fetch handler's
@@ -67,10 +75,11 @@ adminRoutes.post('/export', async (c) => {
   // mechanism the daily cron uses — and return 202 immediately. The outcome of
   // the waitUntil'd task is only observable in worker logs.
   c.executionCtx.waitUntil(
-    runDailyExport(c.env)
+    runDailyExport(c.env, force)
       .then((result) => {
         console.log(
-          `Manual export ${result.exported ? 'completed' : 'skipped (no pending changes)'}: ` +
+          `Manual export${force ? ' (forced)' : ''} ` +
+            `${result.exported ? 'completed' : 'skipped (no pending changes)'}: ` +
             `version=${result.version}, files=${result.files.join(',') || '(none)'}, ` +
             `compression=${result.compression}, sha256=${result.sha256 || '(none)'}`
         );
@@ -83,11 +92,20 @@ adminRoutes.post('/export', async (c) => {
   return c.json(
     {
       triggered: true,
+      forced: force,
       message:
-        'Export scheduled in the background. Check worker logs for outcome (metadata.bin + metadata.bin.sha256 will appear in the GitHub repo when it succeeds).',
+        `Export scheduled in the background${force ? ' (forced)' : ''}. ` +
+        'Check worker logs for outcome (metadata.bin + metadata.bin.sha256 will appear in the GitHub repo when it succeeds).',
     },
     202
   );
 });
+
+/** Accepts 1/true/yes/on (case-insensitive) as a truthy query flag. */
+function isTruthy(raw: string | undefined): boolean {
+  if (!raw) return false;
+  const v = raw.trim().toLowerCase();
+  return v === '1' || v === 'true' || v === 'yes' || v === 'on';
+}
 
 export default adminRoutes;

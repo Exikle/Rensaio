@@ -266,6 +266,9 @@ namespace RensaioBackend.Services.Background
                 _workerTasks.Add(StartWorker<JobQueueHostedService>(workerToken));
                 _workerTasks.Add(StartWorker<JobScheduledHostedService>(workerToken));
                 _workerTasks.Add(StartWorker<MetadataBackgroundScanService>(workerToken));
+                _workerTasks.Add(StartWorker<ContributionUploadBackgroundService>(workerToken));
+                _workerTasks.Add(StartWorker<ContributionImportBackgroundService>(workerToken));
+
             }
             catch (Exception ex)
             {

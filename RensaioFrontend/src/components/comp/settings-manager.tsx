@@ -19,7 +19,7 @@ import { userService } from "@/lib/api/services/userService";
 import { UserIcon, Upload } from "lucide-react";
 import { fetchGravatarBase64 } from "@/lib/gravatar";
 import { Badge } from "@/components/ui/badge";
-import { Plus, X, Save, Loader2, GripVertical, ChevronDown, BadgeCheck, AlertCircle } from "lucide-react";
+import { Plus, X, Save, Loader2, GripVertical, BadgeCheck, AlertCircle } from "lucide-react";
 import { useRouter } from "next/navigation";
 import {
   useSettings,
@@ -49,11 +49,6 @@ import {
 import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { RadioGroup, RadioGroupItem } from "../ui/radio-group";
-import {
-  Collapsible,
-  CollapsibleTrigger,
-  CollapsibleContent,
-} from "../ui/collapsible";
 
 // Helper functions
 const isValidUrl = (url: string): boolean => {
@@ -1165,19 +1160,6 @@ function SecuritySection({
 
   return (
     <CardContent className="space-y-4">
-      <div className="flex items-center space-x-2">
-        <Switch
-          id="auth-enabled"
-          checked={authEnabled}
-          onCheckedChange={(checked) =>
-            setLocalSettings((prev) => ({
-              ...prev,
-              authenticationEnabled: checked,
-            }))
-          }
-        />
-        <Label htmlFor="auth-enabled">Enable Authentication</Label>
-      </div>
       <div className="space-y-2">
         <Label htmlFor="external-domain">External Domain</Label>
         <Input
@@ -1205,118 +1187,133 @@ function SecuritySection({
         </p>
       </div>
 
-      <div className="space-y-3 border-t pt-4">
-        <div className="flex items-center space-x-2">
-          <Switch
-            id="oidc-enabled"
-            checked={localSettings.oidcEnabled}
-            disabled={oidcLocked || !authEnabled}
-            onCheckedChange={(checked) =>
-              setLocalSettings((prev) => ({ ...prev, oidcEnabled: checked }))
-            }
-          />
-          <Label htmlFor="oidc-enabled">Single Sign-On (OpenID Connect)</Label>
-        </div>
-        <p className="text-xs text-muted-foreground">
-          Let users log in with an identity provider such as Authentik, Keycloak,
-          Pocket ID or Authelia. Requires authentication to be enabled. Register a
-          client at your provider with the callback URL{" "}
-          <code className="font-mono">
-            {(localSettings.externalDomain || "https://your-rensaio").replace(/\/$/, "")}
-            /api/auth/oidc/callback
-          </code>
-          .
-        </p>
-        {oidcLocked && (
-          <p className="text-xs text-amber-600 dark:text-amber-400">
-            These values come from appsettings.json or environment variables and
-            cannot be changed here.
-          </p>
-        )}
-        {localSettings.oidcConfigError && (
-          <p className="text-xs text-red-600 dark:text-red-400">
-            The Oidc configuration could not be read, so single sign-on is off:{" "}
-            {localSettings.oidcConfigError}
-          </p>
-        )}
-        <div className="space-y-2">
-          <Label htmlFor="oidc-issuer">Issuer URL</Label>
-          <Input
-            id="oidc-issuer"
-            value={localSettings.oidcIssuer || ""}
-            disabled={oidcLocked || !authEnabled}
-            onChange={(e) =>
-              setLocalSettings((prev) => ({ ...prev, oidcIssuer: e.target.value }))
-            }
-            placeholder="https://id.example.com"
-          />
-        </div>
-        <div className="space-y-2">
-          <Label htmlFor="oidc-client-id">Client ID</Label>
-          <Input
-            id="oidc-client-id"
-            value={localSettings.oidcClientId || ""}
-            disabled={oidcLocked || !authEnabled}
-            onChange={(e) =>
-              setLocalSettings((prev) => ({ ...prev, oidcClientId: e.target.value }))
-            }
-            placeholder="rensaio"
-          />
-        </div>
-        <div className="space-y-2">
-          <Label htmlFor="oidc-client-secret">Client Secret</Label>
-          <Input
-            id="oidc-client-secret"
-            type="password"
-            value={localSettings.oidcClientSecret || ""}
-            disabled={oidcLocked || !authEnabled}
-            onChange={(e) =>
-              setLocalSettings((prev) => ({ ...prev, oidcClientSecret: e.target.value }))
-            }
-            placeholder={
-              localSettings.oidcClientSecretSet && !localSettings.oidcClearClientSecret
-                ? "•••••••• (stored — leave empty to keep)"
-                : "Leave empty for a public client (PKCE only)"
-            }
-          />
-          {localSettings.oidcClientSecretSet && !oidcLocked && (
-            <div className="flex items-center space-x-2">
-              <Checkbox
-                id="oidc-clear-secret"
-                checked={!!localSettings.oidcClearClientSecret}
-                disabled={!authEnabled}
-                onCheckedChange={(checked) =>
-                  setLocalSettings((prev) => ({
-                    ...prev,
-                    oidcClearClientSecret: checked === true,
-                    oidcClientSecret: checked === true ? "" : prev.oidcClientSecret,
-                  }))
-                }
-              />
-              <Label htmlFor="oidc-clear-secret" className="text-xs font-normal cursor-pointer">
-                Remove the stored secret on save (public client)
-              </Label>
-            </div>
-          )}
-        </div>
-        <div className="space-y-2">
-          <Label htmlFor="oidc-button-label">Login button label</Label>
-          <Input
-            id="oidc-button-label"
-            value={localSettings.oidcButtonLabel || ""}
-            disabled={oidcLocked || !authEnabled}
-            onChange={(e) =>
-              setLocalSettings((prev) => ({ ...prev, oidcButtonLabel: e.target.value }))
-            }
-            placeholder="Single Sign-On"
-          />
-        </div>
-        <p className="text-xs text-muted-foreground">
-          Group mapping, auto-registration, claim names and hiding the password form
-          are configured in the <code className="font-mono">Oidc</code> section of
-          appsettings.json. See the README.
-        </p>
+      <div className="flex items-center space-x-2">
+        <Switch
+          id="auth-enabled"
+          checked={authEnabled}
+          onCheckedChange={(checked) =>
+            setLocalSettings((prev) => ({
+              ...prev,
+              authenticationEnabled: checked,
+            }))
+          }
+        />
+        <Label htmlFor="auth-enabled">Enable Authentication</Label>
       </div>
+
+      {authEnabled && (
+        <div className="border-muted space-y-3 border-l-2 pl-6">
+          <div className="flex items-center space-x-2">
+            <Switch
+              id="oidc-enabled"
+              checked={localSettings.oidcEnabled}
+              disabled={oidcLocked}
+              onCheckedChange={(checked) =>
+                setLocalSettings((prev) => ({ ...prev, oidcEnabled: checked }))
+              }
+            />
+            <Label htmlFor="oidc-enabled">Single Sign-On (OpenID Connect)</Label>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Let users log in with an identity provider such as Authentik, Keycloak,
+            Pocket ID or Authelia. Requires authentication to be enabled. Register a
+            client at your provider with the callback URL{" "}
+            <code className="font-mono">
+              {(localSettings.externalDomain || "https://your-rensaio").replace(/\/$/, "")}
+              /api/auth/oidc/callback
+            </code>
+            .
+          </p>
+          {oidcLocked && (
+            <p className="text-xs text-amber-600 dark:text-amber-400">
+              These values come from appsettings.json or environment variables and
+              cannot be changed here.
+            </p>
+          )}
+          {localSettings.oidcConfigError && (
+            <p className="text-xs text-red-600 dark:text-red-400">
+              The Oidc configuration could not be read, so single sign-on is off:{" "}
+              {localSettings.oidcConfigError}
+            </p>
+          )}
+          <div className="space-y-2">
+            <Label htmlFor="oidc-issuer">Issuer URL</Label>
+            <Input
+              id="oidc-issuer"
+              value={localSettings.oidcIssuer || ""}
+              disabled={oidcLocked}
+              onChange={(e) =>
+                setLocalSettings((prev) => ({ ...prev, oidcIssuer: e.target.value }))
+              }
+              placeholder="https://id.example.com"
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="oidc-client-id">Client ID</Label>
+            <Input
+              id="oidc-client-id"
+              value={localSettings.oidcClientId || ""}
+              disabled={oidcLocked}
+              onChange={(e) =>
+                setLocalSettings((prev) => ({ ...prev, oidcClientId: e.target.value }))
+              }
+              placeholder="rensaio"
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="oidc-client-secret">Client Secret</Label>
+            <Input
+              id="oidc-client-secret"
+              type="password"
+              value={localSettings.oidcClientSecret || ""}
+              disabled={oidcLocked}
+              onChange={(e) =>
+                setLocalSettings((prev) => ({ ...prev, oidcClientSecret: e.target.value }))
+              }
+              placeholder={
+                localSettings.oidcClientSecretSet && !localSettings.oidcClearClientSecret
+                  ? "•••••••• (stored — leave empty to keep)"
+                  : "Leave empty for a public client (PKCE only)"
+              }
+            />
+            {localSettings.oidcClientSecretSet && !oidcLocked && (
+              <div className="flex items-center space-x-2">
+                <Checkbox
+                  id="oidc-clear-secret"
+                  checked={!!localSettings.oidcClearClientSecret}
+                  onCheckedChange={(checked) =>
+                    setLocalSettings((prev) => ({
+                      ...prev,
+                      oidcClearClientSecret: checked === true,
+                      oidcClientSecret: checked === true ? "" : prev.oidcClientSecret,
+                    }))
+                  }
+                />
+                <Label htmlFor="oidc-clear-secret" className="text-xs font-normal cursor-pointer">
+                  Remove the stored secret on save (public client)
+                </Label>
+              </div>
+            )}
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="oidc-button-label">Login button label</Label>
+            <Input
+              id="oidc-button-label"
+              value={localSettings.oidcButtonLabel || ""}
+              disabled={oidcLocked}
+              onChange={(e) =>
+                setLocalSettings((prev) => ({ ...prev, oidcButtonLabel: e.target.value }))
+              }
+              placeholder="Single Sign-On"
+            />
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Group mapping, auto-registration, claim names and hiding the password form
+            are configured in the <code className="font-mono">Oidc</code> section of
+            appsettings.json. See the README.
+          </p>
+        </div>
+      )}
     </CardContent>
   );
 }
@@ -1422,88 +1419,87 @@ function ContributionSection({
         </div>
       </div>
 
-      {/* Contributor Id — always visible like the SOCKS fields, editable only
-          once Contribution is enabled. */}
-      <div className="grid gap-4 md:grid-cols-2">
-        <div>
-          <Label htmlFor="contribution-contributor-id">Contributor Id</Label>
-          <Input
-            id="contribution-contributor-id"
-            type="text"
-            placeholder="00000000-0000-0000-0000-000000000000"
-            value={localSettings.contributionContributorId || ""}
-            onChange={(e) =>
-              setLocalSettings((prev) => ({
-                ...prev,
-                contributionContributorId: e.target.value,
-                contributionVerified: false,
-              }))
-            }
-            disabled={!isEnabled}
-          />
-          <p className="text-muted-foreground mt-1 text-sm">
-            Your Contributor UUID. It must be verified against the contribution
-            server before any contribution features unlock.
-          </p>
-        </div>
-        <div>
-          <Label htmlFor="contribution-server-url">Contribution Server URL</Label>
-          <Input
-            id="contribution-server-url"
-            type="text"
-            placeholder="https://contribution.rensaio.net"
-            value={localSettings.contributionServerUrl || ""}
-            onChange={(e) =>
-              setLocalSettings((prev) => ({
-                ...prev,
-                contributionServerUrl: e.target.value,
-              }))
-            }
-            disabled={!isEnabled}
-          />
-          <p className="text-muted-foreground mt-1 text-sm">
-            URL of the contribution server.
-          </p>
-        </div>
-      </div>
-
       {isEnabled && (
-        <div className="flex items-center gap-2">
-          <Button
-            type="button"
-            variant="outline"
-            onClick={handleVerify}
-            disabled={verifyMutation.isPending || !localSettings.contributionContributorId?.trim()}
-          >
-            {verifyMutation.isPending ? (
-              <>
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                Verifying...
-              </>
-            ) : (
-              <>
-                <BadgeCheck className="mr-2 h-4 w-4" />
-                Verify
-              </>
-            )}
-          </Button>
+        <div className="border-muted space-y-4 border-l-2 pl-6">
+          {/* Contributor Id */}
+          <div className="grid gap-4 md:grid-cols-2">
+            <div>
+              <Label htmlFor="contribution-contributor-id">Contributor Id</Label>
+              <Input
+                id="contribution-contributor-id"
+                type="text"
+                placeholder="00000000-0000-0000-0000-000000000000"
+                value={localSettings.contributionContributorId || ""}
+                onChange={(e) =>
+                  setLocalSettings((prev) => ({
+                    ...prev,
+                    contributionContributorId: e.target.value,
+                    contributionVerified: false,
+                  }))
+                }
+              />
+              <p className="text-muted-foreground mt-1 text-sm">
+                Your Contributor UUID. It must be verified against the contribution
+                server before any contribution features unlock.
+              </p>
+            </div>
+            <div>
+              <Label htmlFor="contribution-server-url">Contribution Server URL</Label>
+              <Input
+                id="contribution-server-url"
+                type="text"
+                placeholder="https://contribution.rensaio.net"
+                value={localSettings.contributionServerUrl || ""}
+                onChange={(e) =>
+                  setLocalSettings((prev) => ({
+                    ...prev,
+                    contributionServerUrl: e.target.value,
+                  }))
+                }
+              />
+              <p className="text-muted-foreground mt-1 text-sm">
+                URL of the contribution server.
+              </p>
+            </div>
+          </div>
 
-          {localSettings.contributionVerified ? (
-            <Badge variant="default" className="gap-1">
-              <BadgeCheck className="h-3 w-3" />
-              Verified Contributor
-            </Badge>
-          ) : (
-            <Badge variant="secondary" className="gap-1">
-              <AlertCircle className="h-3 w-3" />
-              Not verified
-            </Badge>
-          )}
-          <span className="text-muted-foreground text-xs">
-            {localSettings.contributionVerified
-              ? "This Contributor Id is registered and active in the contribution server."
-              : "Verify your Contributor Id to enable contribution uploads and the Contribution page."}
-          </span>
+          <div className="flex items-center gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={handleVerify}
+              disabled={verifyMutation.isPending || !localSettings.contributionContributorId?.trim()}
+            >
+              {verifyMutation.isPending ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  Verifying...
+                </>
+              ) : (
+                <>
+                  <BadgeCheck className="mr-2 h-4 w-4" />
+                  Verify
+                </>
+              )}
+            </Button>
+
+            {localSettings.contributionVerified ? (
+              <Badge variant="default" className="gap-1">
+                <BadgeCheck className="h-3 w-3" />
+                Verified Contributor
+              </Badge>
+            ) : (
+              <Badge variant="secondary" className="gap-1">
+                <AlertCircle className="h-3 w-3" />
+                Not verified
+              </Badge>
+            )}
+            <span className="text-muted-foreground text-xs">
+              {localSettings.contributionVerified
+                ? "This Contributor Id is registered and active in the contribution server."
+                : "Verify your Contributor Id to enable contribution uploads and the Contribution page."}
+            </span>
+          </div>
         </div>
       )}
     </CardContent>
@@ -1524,14 +1520,22 @@ function CefAdvancedSection({
 
   return (
     <CardContent>
-      <Collapsible open={open} onOpenChange={setOpen}>
-        <CollapsibleTrigger asChild>
-          <Button variant="ghost" className="text-muted-foreground flex w-full justify-between px-0">
-            <span>Advanced</span>
-            <ChevronDown className={`h-4 w-4 transition-transform ${open ? "rotate-180" : ""}`} />
-          </Button>
-        </CollapsibleTrigger>
-        <CollapsibleContent className="space-y-4 pt-2">
+      <div className="flex items-center space-x-2">
+        <Switch
+          id="advanced-options"
+          checked={open}
+          onCheckedChange={setOpen}
+        />
+        <div>
+          <Label htmlFor="advanced-options">Advanced</Label>
+          <p className="text-muted-foreground mt-1 text-sm">
+            Show advanced embedded browser and message-pump tuning options.
+          </p>
+        </div>
+      </div>
+
+      {open && (
+        <div className="border-muted space-y-4 border-l-2 pl-6 pt-2">
           <div className="flex items-center space-x-2">
             <Switch
               id="cef-enabled"
@@ -1628,8 +1632,8 @@ function CefAdvancedSection({
             />
             <Label htmlFor="cef-pool-enabled">WebView Pooling / Reuse</Label>
           </div>
-        </CollapsibleContent>
-      </Collapsible>
+        </div>
+      )}
     </CardContent>
   );
 }
@@ -1637,22 +1641,16 @@ function CefAdvancedSection({
 // Available settings sections
 const AVAILABLE_SECTIONS: SettingsSection[] = [
   {
-    id: "security",
-    title: "Security",
-    description: "Configure authentication and security settings.",
-    component: SecuritySection,
-  },
-  {
-    id: "contribution",
-    title: "Contribution",
-    description: "Configure contribution of your series metadata to the global contribution server.",
-    component: ContributionSection,
-  },
-  {
     id: "content-preferences",
     title: "Content Preferences",
     description: "Configure your languages and content filters.",
     component: ContentPreferencesSection,
+  },
+  {
+    id: "storage",
+    title: "Storage",
+    description: "Configure how archives are stored and organized.",
+    component: StorageSection,
   },
   {
     id: "mihon-repositories",
@@ -1673,10 +1671,10 @@ const AVAILABLE_SECTIONS: SettingsSection[] = [
     component: ScheduleTasksSection,
   },
   {
-    id: "storage",
-    title: "Storage",
-    description: "Configure how archives are stored and organized.",
-    component: StorageSection,
+    id: "security",
+    title: "Security",
+    description: "Configure authentication and security settings.",
+    component: SecuritySection,
   },
   {
     id: "flaresolverr",
@@ -1691,6 +1689,12 @@ const AVAILABLE_SECTIONS: SettingsSection[] = [
     component: SocksSettingsSection,
   },
   {
+    id: "contribution",
+    title: "Contribution",
+    description: "Configure contribution of your series metadata to the global contribution server.",
+    component: ContributionSection,
+  },
+  {
     id: "advanced-cef",
     title: "Advanced",
     description: "Embedded browser and message-pump tuning. Changes marked (restart) apply on next start.",
@@ -1703,6 +1707,8 @@ interface SettingsManagerProps {
   sections?: string[];
   /** Whether to show the save button */
   showSaveButton?: boolean;
+  /** Whether to show an additional save button at the end of the sections */
+  showFooterSaveButton?: boolean;
   /** Whether to show the main title and description */
   showHeader?: boolean;
   /** Custom title */
@@ -1724,6 +1730,7 @@ interface SettingsManagerProps {
 export function SettingsManager({
   sections,
   showSaveButton = true,
+  showFooterSaveButton = false,
   showHeader = true,
   title = "Settings",
   description = "Configure your Rensaiō application settings",
@@ -1912,6 +1919,28 @@ export function SettingsManager({
           );
         })}
       </div>
+
+      {showFooterSaveButton && (
+        <div className="flex items-center justify-between">
+          <div />
+          <Button
+            onClick={handleSave}
+            disabled={updateSettingsMutation.isPending}
+          >
+            {updateSettingsMutation.isPending ? (
+              <>
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                Saving...
+              </>
+            ) : (
+              <>
+                <Save className="mr-2 h-4 w-4" />
+                Save Settings
+              </>
+            )}
+          </Button>
+        </div>
+      )}
     </div>
   );
 }
