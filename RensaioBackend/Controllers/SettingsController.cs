@@ -70,7 +70,12 @@ namespace RensaioBackend.Controllers
             try
             {
                 var settings = await _settingsService.GetSettingsAsync(token).ConfigureAwait(false);
-                return Ok(settings);
+                // Every logged-in user can read settings; never hand out the OIDC client secret.
+                // Work on a copy so the cached instance keeps the real value.
+                var view = _settingsService.GetFromEditableSettings(settings);
+                view.OidcClientSecretSet = !string.IsNullOrEmpty(view.OidcClientSecret);
+                view.OidcClientSecret = string.Empty;
+                return Ok(view);
             }
             catch (Exception ex)
             {

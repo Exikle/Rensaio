@@ -1266,7 +1266,11 @@ function SecuritySection({
             onChange={(e) =>
               setLocalSettings((prev) => ({ ...prev, oidcClientSecret: e.target.value }))
             }
-            placeholder="Leave empty for a public client (PKCE only)"
+            placeholder={
+              localSettings.oidcClientSecretSet
+                ? "•••••••• (stored — leave empty to keep)"
+                : "Leave empty for a public client (PKCE only)"
+            }
           />
         </div>
         <div className="space-y-2">

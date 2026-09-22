@@ -23,4 +23,11 @@ public class SettingsDto : EditableSettingsDto
     [JsonPropertyName("oidcManagedByConfig")]
     public bool OidcManagedByConfig { get; set; }
 
+    /// <summary>
+    /// True when a client secret is configured. The secret itself is never sent to
+    /// clients; <see cref="SettingsController"/> blanks it. Server-computed, never persisted.
+    /// </summary>
+    [JsonPropertyName("oidcClientSecretSet")]
+    public bool OidcClientSecretSet { get; set; }
+
 }

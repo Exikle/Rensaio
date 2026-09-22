@@ -238,6 +238,7 @@ namespace RensaioBackend.Services.Settings
 
         public async Task SaveSettingsAsync(EditableSettingsDto set, bool force = false, CancellationToken token = default)
         {
+            await PreserveStoredOidcValuesAsync(set, token).ConfigureAwait(false);
             if (set.NumberOfSimultaneousDownloads != _settings?.NumberOfSimultaneousDownloads ||
                 set.ChapterDownloadFailRetries != _settings?.ChapterDownloadFailRetries ||
                 set.ChapterDownloadFailRetryTime != _settings?.ChapterDownloadFailRetryTime || 
@@ -393,25 +394,42 @@ namespace RensaioBackend.Services.Settings
                 ContributionVerified = _settings?.ContributionVerified ?? false,
             };
 
+            await SaveSettingsAsync(editableSettings, force, token).ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// Protects the stored OIDC values on every save path (REST and MCP):
+        /// - when config/env supplies them, the caller only ever saw effective values,
+        ///   so keep what is stored and never write an environment secret to the DB;
+        /// - otherwise an empty client secret means "keep the current one", because
+        ///   GET never returns the secret to clients.
+        /// </summary>
+        private async Task PreserveStoredOidcValuesAsync(EditableSettingsDto set, CancellationToken token)
+        {
+            string[] names =
+            [
+                nameof(EditableSettingsDto.OidcEnabled),
+                nameof(EditableSettingsDto.OidcIssuer),
+                nameof(EditableSettingsDto.OidcClientId),
+                nameof(EditableSettingsDto.OidcClientSecret),
+                nameof(EditableSettingsDto.OidcButtonLabel),
+            ];
+            var stored = await _db.Settings.AsNoTracking()
+                .Where(s => names.Contains(s.Name))
+                .ToDictionaryAsync(s => s.Name, s => s.Value, token).ConfigureAwait(false);
+
             if (Auth.Oidc.OidcOptions.IsManagedByConfig(_config))
             {
-                // The client saw the effective (config-supplied) OIDC values. Keep whatever
-                // is already stored so a secret from the environment never lands in the DB.
-                var stored = await _db.Settings.AsNoTracking()
-                    .Where(s => s.Name == nameof(EditableSettingsDto.OidcEnabled)
-                             || s.Name == nameof(EditableSettingsDto.OidcIssuer)
-                             || s.Name == nameof(EditableSettingsDto.OidcClientId)
-                             || s.Name == nameof(EditableSettingsDto.OidcClientSecret)
-                             || s.Name == nameof(EditableSettingsDto.OidcButtonLabel))
-                    .ToDictionaryAsync(s => s.Name, s => s.Value, token).ConfigureAwait(false);
-                editableSettings.OidcEnabled = stored.TryGetValue(nameof(EditableSettingsDto.OidcEnabled), out var e) && bool.TryParse(e, out var eb) && eb;
-                editableSettings.OidcIssuer = stored.GetValueOrDefault(nameof(EditableSettingsDto.OidcIssuer)) ?? string.Empty;
-                editableSettings.OidcClientId = stored.GetValueOrDefault(nameof(EditableSettingsDto.OidcClientId)) ?? string.Empty;
-                editableSettings.OidcClientSecret = stored.GetValueOrDefault(nameof(EditableSettingsDto.OidcClientSecret)) ?? string.Empty;
-                editableSettings.OidcButtonLabel = stored.GetValueOrDefault(nameof(EditableSettingsDto.OidcButtonLabel)) ?? "Single Sign-On";
+                set.OidcEnabled = stored.TryGetValue(nameof(EditableSettingsDto.OidcEnabled), out var e) && bool.TryParse(e, out var eb) && eb;
+                set.OidcIssuer = stored.GetValueOrDefault(nameof(EditableSettingsDto.OidcIssuer)) ?? string.Empty;
+                set.OidcClientId = stored.GetValueOrDefault(nameof(EditableSettingsDto.OidcClientId)) ?? string.Empty;
+                set.OidcClientSecret = stored.GetValueOrDefault(nameof(EditableSettingsDto.OidcClientSecret)) ?? string.Empty;
+                set.OidcButtonLabel = stored.GetValueOrDefault(nameof(EditableSettingsDto.OidcButtonLabel)) ?? "Single Sign-On";
             }
-
-            await SaveSettingsAsync(editableSettings, force, token).ConfigureAwait(false);
+            else if (string.IsNullOrEmpty(set.OidcClientSecret))
+            {
+                set.OidcClientSecret = stored.GetValueOrDefault(nameof(EditableSettingsDto.OidcClientSecret)) ?? string.Empty;
+            }
         }
 
         /// <summary>
