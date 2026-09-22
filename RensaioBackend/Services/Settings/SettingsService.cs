@@ -393,6 +393,24 @@ namespace RensaioBackend.Services.Settings
                 ContributionVerified = _settings?.ContributionVerified ?? false,
             };
 
+            if (Auth.Oidc.OidcOptions.IsManagedByConfig(_config))
+            {
+                // The client saw the effective (config-supplied) OIDC values. Keep whatever
+                // is already stored so a secret from the environment never lands in the DB.
+                var stored = await _db.Settings.AsNoTracking()
+                    .Where(s => s.Name == nameof(EditableSettingsDto.OidcEnabled)
+                             || s.Name == nameof(EditableSettingsDto.OidcIssuer)
+                             || s.Name == nameof(EditableSettingsDto.OidcClientId)
+                             || s.Name == nameof(EditableSettingsDto.OidcClientSecret)
+                             || s.Name == nameof(EditableSettingsDto.OidcButtonLabel))
+                    .ToDictionaryAsync(s => s.Name, s => s.Value, token).ConfigureAwait(false);
+                editableSettings.OidcEnabled = stored.TryGetValue(nameof(EditableSettingsDto.OidcEnabled), out var e) && bool.TryParse(e, out var eb) && eb;
+                editableSettings.OidcIssuer = stored.GetValueOrDefault(nameof(EditableSettingsDto.OidcIssuer)) ?? string.Empty;
+                editableSettings.OidcClientId = stored.GetValueOrDefault(nameof(EditableSettingsDto.OidcClientId)) ?? string.Empty;
+                editableSettings.OidcClientSecret = stored.GetValueOrDefault(nameof(EditableSettingsDto.OidcClientSecret)) ?? string.Empty;
+                editableSettings.OidcButtonLabel = stored.GetValueOrDefault(nameof(EditableSettingsDto.OidcButtonLabel)) ?? "Single Sign-On";
+            }
+
             await SaveSettingsAsync(editableSettings, force, token).ConfigureAwait(false);
         }
 
@@ -533,6 +551,17 @@ namespace RensaioBackend.Services.Settings
             };
             set.StorageFolder = _config["StorageFolder"] ?? string.Empty;
             set.OidcManagedByConfig = Auth.Oidc.OidcOptions.IsManagedByConfig(_config);
+            if (set.OidcManagedByConfig)
+            {
+                // Show the effective values so the (read-only) Settings fields reflect
+                // reality. SaveSettingsAsync(SettingsDto) keeps them out of the database.
+                var effective = Auth.Oidc.OidcOptions.Resolve(_config, ed);
+                set.OidcEnabled = effective.Enabled;
+                set.OidcIssuer = effective.Issuer;
+                set.OidcClientId = effective.ClientId;
+                set.OidcClientSecret = effective.ClientSecret;
+                set.OidcButtonLabel = effective.ButtonLabel;
+            }
             return set;
         }
         /// <summary>
