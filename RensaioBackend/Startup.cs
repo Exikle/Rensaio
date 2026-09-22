@@ -135,17 +135,20 @@ namespace RensaioBackend
             // place that reads ConnectionStrings:DefaultConnection and the Database section.
             var databaseConfig = DatabaseConfig.Resolve(Configuration);
             services.AddSingleton(databaseConfig);
-            services.AddDbContext<AppDbContext>(options =>
+            switch (databaseConfig.Provider)
             {
-                switch (databaseConfig.Provider)
-                {
-                    case DatabaseProvider.Sqlite:
-                        options.UseSqlite(databaseConfig.SqliteConnectionString);
-                        break;
-                    default:
-                        throw new NotSupportedException($"Database provider '{databaseConfig.Provider}' is not available in this build.");
-                }
-            });
+                case DatabaseProvider.Sqlite:
+                    services.AddDbContext<AppDbContext, SqliteAppDbContext>(options =>
+                        SqliteAppDbContext.Configure(options, databaseConfig.SqliteConnectionString!));
+                    break;
+                case DatabaseProvider.Postgres:
+                    string postgresConnectionString = PostgresAppDbContext.BuildConnectionString(databaseConfig.Postgres!);
+                    services.AddDbContext<AppDbContext, PostgresAppDbContext>(options =>
+                        PostgresAppDbContext.Configure(options, postgresConnectionString));
+                    break;
+                default:
+                    throw new NotSupportedException($"Database provider '{databaseConfig.Provider}' is not supported.");
+            }
 
             // Register ContributionDbContext with SQLite provider, using the derived
             // contributor.db path (sibling of rensaio.db under the runtime directory).

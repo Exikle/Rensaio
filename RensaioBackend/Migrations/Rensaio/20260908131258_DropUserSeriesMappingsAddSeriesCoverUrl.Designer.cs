@@ -10,7 +10,7 @@ using RensaioBackend.Data;
 
 namespace RensaioBackend.Migrations.Rensaio
 {
-    [DbContext(typeof(AppDbContext))]
+    [DbContext(typeof(SqliteAppDbContext))]
     [Migration("20260908131258_DropUserSeriesMappingsAddSeriesCoverUrl")]
     partial class DropUserSeriesMappingsAddSeriesCoverUrl
     {

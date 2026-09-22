@@ -10,7 +10,7 @@ using RensaioBackend.Data;
 
 namespace RensaioBackend.Migrations.Rensaio
 {
-    [DbContext(typeof(AppDbContext))]
+    [DbContext(typeof(SqliteAppDbContext))]
     [Migration("20260922034118_AddUserExternalLogins")]
     partial class AddUserExternalLogins
     {

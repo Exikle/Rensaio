@@ -7,7 +7,7 @@ using System;
 
 namespace RensaioBackend.Migrations.Rensaio
 {
-    [DbContext(typeof(AppDbContext))]
+    [DbContext(typeof(SqliteAppDbContext))]
     [Migration("20260609135605_AddSeriesMappingsTable")]
     public partial class AddSeriesMappingsTable : Microsoft.EntityFrameworkCore.Migrations.Migration
     {

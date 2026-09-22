@@ -4,7 +4,7 @@ using Microsoft.EntityFrameworkCore.Migrations;
 
 namespace RensaioBackend.Migrations.Rensaio;
 
-[DbContext(typeof(AppDbContext))]
+[DbContext(typeof(SqliteAppDbContext))]
 [Migration("20260603150000_AddReleaseCadenceDays")]
 public partial class AddReleaseCadenceDays : Microsoft.EntityFrameworkCore.Migrations.Migration
 {

@@ -11,22 +11,20 @@ using RensaioBackend.Data.Converters;
 
 namespace RensaioBackend.Data
 {
-    //Only used to do migrations, repoint to your test database if you're dev.
-    public class AppDbContextDesignTimeFactory : IDesignTimeDbContextFactory<AppDbContext>
-    {
-        public AppDbContext CreateDbContext(string[] args)
-        {
-            var options = new DbContextOptionsBuilder<AppDbContext>()
-                .UseSqlite("Data Source=C:\\users\\mpiva\\appdata\\local\\rensaio\\rensaio.db")
-                .Options;
-            return new AppDbContext(options);
-        }
-    }
+    /// <summary>
+    /// The application database. Services depend on this type; the provider-specific
+    /// subclasses (<see cref="SqliteAppDbContext"/>, <see cref="PostgresAppDbContext"/>)
+    /// exist so EF Core can keep one migration set per provider and one model cache per
+    /// provider, while all entity configuration lives here.
+    /// </summary>
     public class AppDbContext : DbContext
     {
         public AppDbContext(DbContextOptions<AppDbContext> options) : base(options)
         {
-         
+        }
+
+        protected AppDbContext(DbContextOptions options) : base(options)
+        {
         }
         public DbSet<SeriesEntity> Series { get; set; }
         public DbSet<SettingEntity> Settings { get; set; }

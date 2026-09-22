@@ -8,7 +8,7 @@ using Microsoft.EntityFrameworkCore.Migrations;
 namespace RensaioBackend.Migrations.Rensaio
 {
     /// <inheritdoc />
-    [DbContext(typeof(AppDbContext))]
+    [DbContext(typeof(SqliteAppDbContext))]
     [Migration("20260605000426_UserManagementSystem")]
     public partial class UserManagementSystem : Microsoft.EntityFrameworkCore.Migrations.Migration
     {

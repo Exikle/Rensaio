@@ -11,7 +11,7 @@ namespace RensaioBackend.Migrations.Rensaio
     /// mapping-conflict repair pass and the ownership guard can find every series claiming
     /// a given external id quickly.
     /// </summary>
-    [DbContext(typeof(AppDbContext))]
+    [DbContext(typeof(SqliteAppDbContext))]
     [Migration("20260916010000_AddSeriesMappingProviderExternalIndex")]
     public partial class AddSeriesMappingProviderExternalIndex : Microsoft.EntityFrameworkCore.Migrations.Migration
     {

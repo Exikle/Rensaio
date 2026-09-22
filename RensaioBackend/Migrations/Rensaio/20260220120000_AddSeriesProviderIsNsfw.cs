@@ -4,7 +4,7 @@ using Microsoft.EntityFrameworkCore.Migrations;
 
 namespace RensaioBackend.Migrations.Rensaio;
 
-[DbContext(typeof(AppDbContext))]
+[DbContext(typeof(SqliteAppDbContext))]
 [Migration("20260220120000_AddSeriesProviderIsNsfw")]
 public partial class AddSeriesProviderIsNsfw : Microsoft.EntityFrameworkCore.Migrations.Migration
 {

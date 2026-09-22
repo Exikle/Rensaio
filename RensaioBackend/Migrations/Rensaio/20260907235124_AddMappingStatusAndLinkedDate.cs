@@ -12,7 +12,7 @@ namespace RensaioBackend.Migrations.Rensaio
     ///   SeriesMappings.LinkedDate      (UTC link/decision timestamp; temp-ignore review basis)
     ///   UserSeriesMappings.LinkedDate  (per-user UTC timestamp; informational)
     /// </summary>
-    [DbContext(typeof(AppDbContext))]
+    [DbContext(typeof(SqliteAppDbContext))]
     [Migration("20260907235124_AddMappingStatusAndLinkedDate")]
     public partial class AddMappingStatusAndLinkedDate : Microsoft.EntityFrameworkCore.Migrations.Migration
     {

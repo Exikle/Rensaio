@@ -150,11 +150,11 @@ public class MigrationService
         if (!File.Exists(newDatabasePath) || isEmptyFile)
         {
             _logger.LogInformation("No existing database found at {Path}. Assuming new installation.", newDatabasePath);
-            var newDbOptions2 = new DbContextOptionsBuilder<AppDbContext>()
+            var newDbOptions2 = new DbContextOptionsBuilder<SqliteAppDbContext>()
                 .UseSqlite($"Data Source={newDatabasePath}")
                 .UseQueryTrackingBehavior(QueryTrackingBehavior.TrackAll)
                 .Options;
-            await using var targetDb2 = new AppDbContext(newDbOptions2);
+            await using var targetDb2 = new SqliteAppDbContext(newDbOptions2);
             await targetDb2.Database.EnsureCreatedAsync(cancellationToken).ConfigureAwait(false);
             // EnsureCreated builds the full schema from the model but does NOT create __EFMigrationsHistory.
             // When MigrateAsync runs later, it would try to apply all migrations (e.g. AddColumn IsNSFW)
@@ -188,13 +188,13 @@ public class MigrationService
             .UseQueryTrackingBehavior(QueryTrackingBehavior.NoTracking)
             .Options;
 
-        var newDbOptions = new DbContextOptionsBuilder<AppDbContext>()
+        var newDbOptions = new DbContextOptionsBuilder<SqliteAppDbContext>()
             .UseSqlite($"Data Source={newDatabasePath}")
             .UseQueryTrackingBehavior(QueryTrackingBehavior.TrackAll)
             .Options;
 
         await using var legacyDb = new OldDbContext(oldDbOptions);
-        await using var targetDb = new AppDbContext(newDbOptions);
+        await using var targetDb = new SqliteAppDbContext(newDbOptions);
 
         if (File.Exists(newDatabasePath))
         {
