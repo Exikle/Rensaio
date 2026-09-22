@@ -236,9 +236,9 @@ namespace RensaioBackend.Services.Settings
             }
         }
 
-        public async Task SaveSettingsAsync(EditableSettingsDto set, bool force = false, CancellationToken token = default)
+        public async Task SaveSettingsAsync(EditableSettingsDto set, bool force = false, CancellationToken token = default, bool clearOidcClientSecret = false)
         {
-            await PreserveStoredOidcValuesAsync(set, token).ConfigureAwait(false);
+            await PreserveStoredOidcValuesAsync(set, clearOidcClientSecret, token).ConfigureAwait(false);
             if (set.NumberOfSimultaneousDownloads != _settings?.NumberOfSimultaneousDownloads ||
                 set.ChapterDownloadFailRetries != _settings?.ChapterDownloadFailRetries ||
                 set.ChapterDownloadFailRetryTime != _settings?.ChapterDownloadFailRetryTime || 
@@ -394,7 +394,7 @@ namespace RensaioBackend.Services.Settings
                 ContributionVerified = _settings?.ContributionVerified ?? false,
             };
 
-            await SaveSettingsAsync(editableSettings, force, token).ConfigureAwait(false);
+            await SaveSettingsAsync(editableSettings, force, token, clearOidcClientSecret: settings.OidcClearClientSecret).ConfigureAwait(false);
         }
 
         /// <summary>
@@ -402,9 +402,10 @@ namespace RensaioBackend.Services.Settings
         /// - when config/env supplies them, the caller only ever saw effective values,
         ///   so keep what is stored and never write an environment secret to the DB;
         /// - otherwise an empty client secret means "keep the current one", because
-        ///   GET never returns the secret to clients.
+        ///   GET never returns the secret to clients; <paramref name="clearClientSecret"/>
+        ///   is the explicit way to remove it (switch to a public client).
         /// </summary>
-        private async Task PreserveStoredOidcValuesAsync(EditableSettingsDto set, CancellationToken token)
+        private async Task PreserveStoredOidcValuesAsync(EditableSettingsDto set, bool clearClientSecret, CancellationToken token)
         {
             string[] names =
             [
@@ -425,6 +426,10 @@ namespace RensaioBackend.Services.Settings
                 set.OidcClientId = stored.GetValueOrDefault(nameof(EditableSettingsDto.OidcClientId)) ?? string.Empty;
                 set.OidcClientSecret = stored.GetValueOrDefault(nameof(EditableSettingsDto.OidcClientSecret)) ?? string.Empty;
                 set.OidcButtonLabel = stored.GetValueOrDefault(nameof(EditableSettingsDto.OidcButtonLabel)) ?? "Single Sign-On";
+            }
+            else if (clearClientSecret)
+            {
+                set.OidcClientSecret = string.Empty;
             }
             else if (string.IsNullOrEmpty(set.OidcClientSecret))
             {

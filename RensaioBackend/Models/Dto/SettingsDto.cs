@@ -30,4 +30,11 @@ public class SettingsDto : EditableSettingsDto
     [JsonPropertyName("oidcClientSecretSet")]
     public bool OidcClientSecretSet { get; set; }
 
+    /// <summary>
+    /// Input-only: set to true on PUT to remove the stored client secret (switch to a
+    /// public client). Needed because an empty secret on PUT means "keep".
+    /// </summary>
+    [JsonPropertyName("oidcClearClientSecret")]
+    public bool OidcClearClientSecret { get; set; }
+
 }

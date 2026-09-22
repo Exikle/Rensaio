@@ -64,6 +64,8 @@ export interface Settings {
   oidcManagedByConfig?: boolean;
   /** Server-computed: a secret is stored. GET never returns it; an empty PUT value keeps it. */
   oidcClientSecretSet?: boolean;
+  /** Input-only: send true to remove the stored secret (switch to a public client). */
+  oidcClearClientSecret?: boolean;
   // Contribution settings
   contributionEnabled: boolean;
   contributionServerUrl: string;

@@ -12,6 +12,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
+import { Checkbox } from "@/components/ui/checkbox";
 import { useAuth } from "@/contexts/auth-context";
 import { useMutation } from "@tanstack/react-query";
 import { userService } from "@/lib/api/services/userService";
@@ -1267,11 +1268,30 @@ function SecuritySection({
               setLocalSettings((prev) => ({ ...prev, oidcClientSecret: e.target.value }))
             }
             placeholder={
-              localSettings.oidcClientSecretSet
+              localSettings.oidcClientSecretSet && !localSettings.oidcClearClientSecret
                 ? "•••••••• (stored — leave empty to keep)"
                 : "Leave empty for a public client (PKCE only)"
             }
           />
+          {localSettings.oidcClientSecretSet && !oidcLocked && (
+            <div className="flex items-center space-x-2">
+              <Checkbox
+                id="oidc-clear-secret"
+                checked={!!localSettings.oidcClearClientSecret}
+                disabled={!authEnabled}
+                onCheckedChange={(checked) =>
+                  setLocalSettings((prev) => ({
+                    ...prev,
+                    oidcClearClientSecret: checked === true,
+                    oidcClientSecret: checked === true ? "" : prev.oidcClientSecret,
+                  }))
+                }
+              />
+              <Label htmlFor="oidc-clear-secret" className="text-xs font-normal cursor-pointer">
+                Remove the stored secret on save (public client)
+              </Label>
+            </div>
+          )}
         </div>
         <div className="space-y-2">
           <Label htmlFor="oidc-button-label">Login button label</Label>
