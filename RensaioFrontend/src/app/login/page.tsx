@@ -154,29 +154,6 @@ function LoginForm() {
             </div>
           )}
 
-          {ssoEnabled && (
-            <Button
-              type="button"
-              variant={showPasswordForm ? 'outline' : 'default'}
-              className="w-full"
-              disabled={loading}
-              onClick={() => { window.location.href = buildSsoUrl(rememberMe || !showPasswordForm); }}
-            >
-              {oidc?.buttonLabel || 'Single Sign-On'}
-            </Button>
-          )}
-
-          {ssoEnabled && showPasswordForm && (
-            <div className="relative">
-              <div className="absolute inset-0 flex items-center">
-                <span className="w-full border-t" />
-              </div>
-              <div className="relative flex justify-center text-xs uppercase">
-                <span className="bg-card px-2 text-muted-foreground">or</span>
-              </div>
-            </div>
-          )}
-
           {showPasswordForm && (
             <form onSubmit={handleSubmit} className="space-y-4">
               <div className="space-y-2">
@@ -216,6 +193,29 @@ function LoginForm() {
                 {loading ? 'Logging in...' : 'Log in'}
               </Button>
             </form>
+          )}
+
+          {ssoEnabled && showPasswordForm && (
+            <div className="relative">
+              <div className="absolute inset-0 flex items-center">
+                <span className="w-full border-t" />
+              </div>
+              <div className="relative flex justify-center text-xs uppercase">
+                <span className="bg-card px-2 text-muted-foreground">or</span>
+              </div>
+            </div>
+          )}
+
+          {ssoEnabled && (
+            <Button
+              type="button"
+              variant={showPasswordForm ? 'outline' : 'default'}
+              className="w-full"
+              disabled={loading}
+              onClick={() => { window.location.href = buildSsoUrl(rememberMe || !showPasswordForm); }}
+            >
+              {oidc?.buttonLabel || 'Single Sign-On'}
+            </Button>
           )}
         </CardContent>
       </Card>
