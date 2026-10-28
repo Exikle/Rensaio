@@ -1,4 +1,4 @@
-id # Hosting Guide: Rensaio Contribution DB on Cloudflare
+# Contribution DB deployment
 
 This guide walks through deploying the `RensaioContributionDB.CF` Cloudflare Worker from scratch.
 
@@ -40,7 +40,7 @@ database_name = "rensaio-contribution-db"
 database_id = "your-database-id-here"
 ```
 
-Copy the `database_id` value and paste it into [`wrangler.toml`](RensaioContributionDB.CF/wrangler.toml).
+Copy the `database_id` value and paste it into [`wrangler.toml`](../../RensaioContributionDB.CF/wrangler.toml).
 
 ---
 
@@ -50,13 +50,13 @@ Copy the `database_id` value and paste it into [`wrangler.toml`](RensaioContribu
 npx wrangler d1 migrations apply rensaio-contribution-db
 ```
 
-This runs [`migrations/0001_create_contribution_tables.sql`](RensaioContributionDB.CF/migrations/0001_create_contribution_tables.sql) which creates the four tables: `contributors`, `titles`, `sources`, and `metadata`.
+This runs [`migrations/0001_create_contribution_tables.sql`](../../RensaioContributionDB.CF/migrations/0001_create_contribution_tables.sql) which creates the four tables: `contributors`, `titles`, `sources`, and `metadata`.
 
 ---
 
 ## Step 4: Configure the Export Target
 
-Edit [`wrangler.toml`](RensaioContributionDB.CF/wrangler.toml):
+Edit [`wrangler.toml`](../../RensaioContributionDB.CF/wrangler.toml):
 
 ```toml
 [vars]
@@ -112,7 +112,7 @@ Generate UUIDs with `uuidgen` (or any UUID v4 generator). These UUIDs are the cr
 
 ## Step 6: Configure the Route (Optional Custom Domain)
 
-The route is already declared in [`wrangler.toml`](wrangler.toml):
+The route is already declared in [`wrangler.toml`](../../RensaioContributionDB.CF/wrangler.toml):
 
 ```toml
 routes = [

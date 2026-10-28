@@ -1,6 +1,6 @@
-# Hosting Guide: Rensaio OAuth Proxy on Cloudflare
+# OAuth proxy deployment
 
-This guide walks through deploying the [`RensaioOAuthProxy.CF`](RensaioOAuthProxy.CF/) Cloudflare Worker from scratch.
+This guide walks through deploying the [`RensaioOAuthProxy.CF`](../../RensaioOAuthProxy.CF/) Cloudflare Worker from scratch.
 
 ---
 
@@ -46,7 +46,7 @@ database_name = "rensaio-oauth-proxy"
 database_id = "your-database-id-here"
 ```
 
-Copy the `database_id` value and paste it into [`wrangler.toml`](RensaioOAuthProxy.CF/wrangler.toml):
+Copy the `database_id` value and paste it into [`wrangler.toml`](../../RensaioOAuthProxy.CF/wrangler.toml):
 
 ```toml
 [[d1_databases]]
@@ -63,7 +63,7 @@ database_id = "your-database-id-here"   # ← paste here
 npx wrangler d1 migrations apply rensaio-oauth-proxy
 ```
 
-This runs [`migrations/0001_create_sessions.sql`](RensaioOAuthProxy.CF/migrations/0001_create_sessions.sql) which creates the `oauth_sessions` table:
+This runs [`migrations/0001_create_sessions.sql`](../../RensaioOAuthProxy.CF/migrations/0001_create_sessions.sql) which creates the `oauth_sessions` table:
 
 ```sql
 CREATE TABLE oauth_sessions (
@@ -83,7 +83,7 @@ CREATE TABLE oauth_sessions (
 
 ### Client IDs (public — set in wrangler.toml)
 
-Edit [`wrangler.toml`](RensaioOAuthProxy.CF/wrangler.toml) and fill in your client IDs:
+Edit [`wrangler.toml`](../../RensaioOAuthProxy.CF/wrangler.toml) and fill in your client IDs:
 
 ```toml
 [vars]
@@ -130,7 +130,7 @@ Secrets are encrypted at rest and injected as environment variables at runtime. 
 If you have a domain (e.g., `auth.rensaio.net`) pointed to Cloudflare:
 
 1. Add the domain to your Cloudflare account (DNS tab)
-2. Update [`wrangler.toml`](RensaioOAuthProxy.CF/wrangler.toml) with your zone ID:
+2. Update [`wrangler.toml`](../../RensaioOAuthProxy.CF/wrangler.toml) with your zone ID:
 
 ```toml
 routes = [
@@ -180,7 +180,7 @@ curl -X POST https://oauth.rensaio.net/api/oauth/unknown/url
 
 ## Step 8: Configure Rensaio Backend
 
-In your Rensaio instance's [`appsettings.json`](RensaioBackend/appsettings.json), point the [`ProxyScrobblerProvider`](RensaioBackend/Services/Scrobbling/Providers/ProxyScrobblerProvider.cs) to your new worker:
+In your Rensaio instance's [`appsettings.json`](../../RensaioBackend/appsettings.json), point the [`ProxyScrobblerProvider`](../../RensaioBackend/Services/Scrobbling/Providers/ProxyScrobblerProvider.cs) to your new worker:
 
 ```json
 "Scrobbling": {
