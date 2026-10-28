@@ -16,7 +16,7 @@ Contributors (user machines running Rensaio) submit `ContributionSnapshotV1` pay
   - [Upload Contribution Snapshot](#upload-contribution-snapshot)
   - [Get Replication Version](#get-replication-version)
   - [Get the Encryption Key](#get-the-encryption-key)
-  - [Ban Contributor](#ban-contributor)
+  - [Ban Contributor](#ban-contributor-admin-only)
 - [Actions: version 0 / -1](#actions-version-0---1)
 - [Admin maintenance endpoints](#admin-maintenance-endpoints)
 - [Daily export](#daily-export)
@@ -27,7 +27,7 @@ Contributors (user machines running Rensaio) submit `ContributionSnapshotV1` pay
 
 ## How it works
 
-```
+```text
                     ┌────────────────────────────────────────────┐
                     │                Cloudflare Worker            │
   Contributor ──►  GET /contributor   ──► validate               │
@@ -95,7 +95,7 @@ All endpoints accept the contributor UUID as a query parameter — **there is no
 
 ### Validate Contributor
 
-```
+```http
 GET /contributor?contributor={UUID}
 ```
 
@@ -116,7 +116,7 @@ Verifies whether a contributor UUID exists and is active.
 
 ### Upload Contribution Snapshot
 
-```
+```http
 POST /upload?contributor={UUID}
 Content-Type: application/json
 ```
@@ -155,7 +155,7 @@ Every valid statement runs in a single D1 batch (atomic). Per-row validation fai
 
 ### Get Replication Version
 
-```
+```http
 GET /replication
 ```
 
@@ -166,7 +166,7 @@ GET /replication
 
 ### Get the Encryption Key
 
-```
+```http
 GET /key
 ```
 
@@ -179,7 +179,7 @@ Returns the base64 concatenation of the AES-256 key + IV (the `AESKEY256IV` secr
 
 ### Ban Contributor (Admin Only)
 
-```
+```http
 POST /admin/ban?admin={adminUUID}
 ```
 
@@ -233,7 +233,7 @@ Both require an **active admin** contributor UUID as a query parameter.
 
 ### Clean the Data Tables
 
-```
+```http
 POST /admin/clean?admin={adminUUID}
 ```
 
@@ -249,7 +249,7 @@ Hard-deletes all rows from the data tables (series, mapping_titles, metadata, so
 
 ### Trigger the Export Manually
 
-```
+```http
 POST /admin/export?admin={adminUUID}
 ```
 
@@ -280,7 +280,7 @@ The worker runs once per day at **06:00 UTC** via a cron trigger:
 
 ### The `metadata.bin` pipeline
 
-```
+```text
 D1 rows ──► protobuf encode (no intermediate JSON)
          ──► [1-byte compression tag] + compress
          ──► AES-256-CBC encrypt
@@ -293,7 +293,7 @@ D1 rows ──► protobuf encode (no intermediate JSON)
 
 **Decoding a snapshot:**
 
-```
+```text
 metadata.bin ──► base64 decode ──► AES-256-CBC decrypt ──► read 1-byte tag
              ──► decompress (ZSTD | Brotli) ──► protobuf decode ──► ContributionSnapshotV1
 ```
@@ -332,3 +332,4 @@ Then seed contributors directly in D1 (Cloudflare Dashboard → D1 → Console):
 ```sql
 INSERT INTO contributors (id, admin, active, ban_reason, last_change)
 VALUES ('<uuid>', 1, 1, NULL, datetime('now'));
+```

@@ -36,8 +36,9 @@ This grants Wrangler (the Cloudflare CLI) permission to deploy workers and manag
 npx wrangler d1 create rensaio-oauth-proxy
 ```
 
-**Output:**
-```
+Output:
+
+```text
 ✅ Successfully created DB 'rensaio-oauth-proxy' in region WEUR
 
 [[d1_databases]]
@@ -101,9 +102,16 @@ npx wrangler secret put PROXY_ANILIST_CLIENT_SECRET
 
 npx wrangler secret put PROXY_MYANIMELIST_CLIENT_SECRET
 # Paste your MAL client secret, press Enter
+
+npx wrangler secret put PROXY_KITSU_CLIENT_SECRET
+# Paste your Kitsu client secret, press Enter
+
+npx wrangler secret put PROXY_MANGADEX_CLIENT_SECRET
+# Paste your MangaDex client secret, press Enter
 ```
 
 > **AniList dual-flow note:** AniList can run either:
+>
 > - **Authorization Code Grant** — set `PROXY_ANILIST_CLIENT_SECRET`. The proxy
 >   exchanges the code server-side and refresh tokens work (silent renewal).
 > - **Implicit Grant** (default when the secret is NOT set) — public client flow.
@@ -113,13 +121,6 @@ npx wrangler secret put PROXY_MYANIMELIST_CLIENT_SECRET
 >
 > To force a specific flow regardless of secret presence, set a var:
 > `PROXY_ANILIST_FLOW = "code"` or `PROXY_ANILIST_FLOW = "implicit"`.
-
-npx wrangler secret put PROXY_KITSU_CLIENT_SECRET
-# Paste your Kitsu client secret, press Enter
-
-npx wrangler secret put PROXY_MANGADEX_CLIENT_SECRET
-# Paste your MangaDex client secret, press Enter
-```
 
 Secrets are encrypted at rest and injected as environment variables at runtime. They are never visible in `wrangler.toml` or your source code.
 
@@ -150,8 +151,9 @@ To find your zone ID: Cloudflare Dashboard → your domain → Overview → Zone
 npx wrangler deploy
 ```
 
-**Output:**
-```
+Output:
+
+```text
 Total Upload: 5.23 KiB / gzip: 1.87 KiB
 Uploaded rensaio-oauth-proxy (2.21 sec)
 Published rensaio-oauth-proxy (0.33 sec)
@@ -191,7 +193,7 @@ In your Rensaio instance's [`appsettings.json`](../../RensaioBackend/appsettings
 }
 ```
 
-No other changes needed — the API contract is identical to the ASP.NET Core version.
+No other changes needed — the API contract is identical to the ASP.NET Core version of the proxy in [`RensaioOAuthProxy/`](../../RensaioOAuthProxy/).
 
 ---
 
