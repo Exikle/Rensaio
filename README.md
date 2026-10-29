@@ -23,6 +23,8 @@
 
 When you subscribe to a series, it will automatically download it. Whenever the series is updated in any of your configured providers, new chapters will be downloaded automatically, in a "drop and forget" fashion.
 
+It connects to sources through <strong>Mihon</strong> extensions.
+
 </div>
 
 > [!IMPORTANT]
@@ -58,46 +60,45 @@ For Docker Compose, Unraid, Kubernetes (Helm), or the desktop app, see the [inst
   Automatically imports your existing library.
 
 - 🔁 **Temporary vs Permanent Sources**  
-  - Chapters are only downloaded from **temporary** sources when there is no permanent sources
+  - Chapters are only downloaded from **temporary** sources when there are no permanent sources.
   - Auto-deleted if a **permanent** source later provides them.
 
 - 🔎 **Multi-Search & Multi-Linking**  
   Search and link one series to **multiple sources/providers**.
 
-- 📥 **Automatic Downloads**
-
-  Everything is automatic, Retries, Reschedules. With a dedicated download Page.
+- 📥 **Automatic Downloads**  
+  Downloads, retries and rescheduling are all automatic, with a dedicated downloads page.
 
 - 🔄 **Auto-Updates**  
   Extensions are kept up to date.
 
-- 👥 **Multi-User System**
+- 👥 **Multi-User System**  
   Create separate accounts with different permission levels. Invite people, and control who has access to what. Optionally enable authentication to restrict access to authorized users only, with password login or [Single Sign-On](./docs/configuration/sso-oidc.md) through any OpenID Connect provider.
 
-- 🩺 **Status & Health Dashboard**
+- 🩺 **Status & Health Dashboard**  
   A dedicated page that shows which series and providers need attention. Color-coded alerts (green/yellow/red) help you spot issues at a glance like broken providers, stale series with no new chapters, and more.
 
-- 📡 **OPDS Server**
-  Read your library from any OPDS-compatible reader app. Browse by all series, what's new, what you're currently reading, categories, and tags. Reading progress syncs back automatically. Each user gets their own unique random OPDS path (e.g. `door-pebble`) for private access. Example: ```https://rensaio.example.com/door-pebble```
+- 📡 **OPDS Server**  
+  Read your library from any OPDS-compatible reader app. Browse by all series, what's new, what you're currently reading, categories, and tags. Reading progress syncs back automatically. Each user gets their own unique random OPDS path (e.g. `door-pebble`) for private access. Example: `https://rensaio.example.com/door-pebble`
 
-- 🤖 **MCP Server (AI Integration)**
-  Expose your library to AI tools through the Model Context Protocol. Let LLMs search your series, check status, and more, all respecting user permissions. Just add /mcp to your OPDS path. Example: ```https://rensaio.example.com/door-pebble/mcp```
+- 🤖 **MCP Server (AI Integration)**  
+  Expose your library to AI tools through the Model Context Protocol. Let LLMs search your series, check status, and more, all respecting user permissions. Just add `/mcp` to your OPDS path. Example: `https://rensaio.example.com/door-pebble/mcp`
 
-- 📖 **Read State Tracking**
-  Remembers where you left off reading each chapter, across all your devices, backed in your series, not the database.
+- 📖 **Read State Tracking**  
+  Remembers where you left off reading each chapter, across all your devices. It is stored with your series, not in the database.
 
-- 🔗 **External Scrobbler Sync**
+- 🔗 **External Scrobbler Sync**  
   Sync your reading progress with external trackers. Supported providers: **AniList**, **MyAnimeList**, **Kitsu**, **MangaDex**. Each user controls their own connections and sync settings.
 
 - 🧹 **Filename Normalization**  
-  Rebuild your library easily with consistent naming, that will help you reimport it back when needed.
+  Rebuild your library with consistent naming, which makes reimporting easy when needed.
 
 - 🧾 **ComicInfo.xml Injection**  
   Chapters include rich metadata from the original source.
 
 - 🖼️ **Extras**
   - Stores `cover.jpg` per series
-  - Stores `rensaio.json` for full metadata mapping, and read-state stored with you series.
+  - Stores `rensaio.json` for full metadata mapping, and read-state stored with your series.
   - External Domain Support for reverse proxy scenarios.
   - Support for jxl, jp2, avif image formats, with real-time transcoding for clients not supporting them.
   - And much more...
